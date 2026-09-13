@@ -1,0 +1,7 @@
+# Placeholder defconfig fragment for your own tweaks.
+# The baseline build ignores this file intentionally.
+# Example, GKID-style:
+# CONFIG_SWAP=y
+# CONFIG_ZRAM_DEF_COMP_LZ4=y
+# CONFIG_ZRAM_WRITEBACK=y
+# CONFIG_ZRAM_MEMORY_TRACKING=y

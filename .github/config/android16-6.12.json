@@ -1,0 +1,16 @@
+{
+  "version": "android16-6.12",
+  "kernel": "6.12",
+  "sublevel": "38",
+  "include": [
+    {
+      "sublevel": "38",
+      "date": "2025-09"
+    },
+    {
+      "sublevel": "38",
+      "date": "2025-10",
+      "note": "Branch not yet published in AOSP when the repository was created; the workflow fails with a clear message until the branch is available."
+    }
+  ]
+}

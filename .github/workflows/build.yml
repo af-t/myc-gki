@@ -1,0 +1,215 @@
+name: Build baseline
+
+# Baseline only: stock AOSP android16-6.12, pinned to 6.12.38 + SPL 2025-09/2025-10.
+# Manual trigger only; builds run in CI. No KSU, SUSFS, or tweaks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spl:
+        description: "SPL (patch date)"
+        type: choice
+        options:
+          - All
+          - 2025-09
+          - 2025-10
+        default: All
+      use_cache:
+        description: "Enable bazel cache (actions/cache)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          SEL="$(printf '%s' '${{ inputs.spl }}' | tr '[:upper:]' '[:lower:]')"
+          [ "$SEL" = "all" ] && SEL=""
+          JSON="$(cat .github/config/android16-6.12.json)"
+          if [ -n "$SEL" ]; then
+            M="$(echo "$JSON" | jq -c --arg s "$SEL" '{include: [.include[] | select(.date == $s)]}')"
+          else
+            M="$(echo "$JSON" | jq -c '{include}')"
+          fi
+          if [ "$(echo "$M" | jq '.include | length')" -eq 0 ]; then
+            echo "No targets match spl='${{ inputs.spl }}'" >&2
+            exit 1
+          fi
+          echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          echo "$M" | jq .
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    name: "6.12.${{ matrix.sublevel }}-android16-${{ matrix.date }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: endersonmenezes/free-disk-space@v4
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+
+      - name: Install repo tool + deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git curl python3 jq ccache
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Preflight branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BR="common-android16-6.12-${{ matrix.date }}"
+          echo "Checking manifest branch: $BR"
+          if ! git ls-remote https://android.googlesource.com/kernel/manifest "refs/heads/$BR" | grep -q .; then
+            echo "::error::Branch $BR does not exist in AOSP. Available branches are currently 2025-08 and 2025-09 (both 6.12.38). Choose 2025-09 or wait for Google to publish 2025-10."
+            exit 22
+          fi
+          echo "Branch $BR is available."
+
+      - name: Sync kernel source (shallow)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p kernel && cd kernel
+          for i in 1 2 3; do
+            rm -rf .repo common build 2>/dev/null || true
+            if ~/bin/repo init -u https://android.googlesource.com/kernel/manifest \
+                -b common-android16-6.12-${{ matrix.date }} --depth=1; then
+              if timeout 15m ~/bin/repo sync -c --current-branch --no-clone-bundle --no-tags -j4; then
+                echo "Sync OK (attempt $i)"
+                break
+              fi
+            fi
+            echo "Attempt $i failed; retrying..."
+            [ "$i" -eq 3 ] && exit 1
+            sleep 15
+          done
+
+      - name: Verify pin 6.12.38
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          V="$(make kernelversion)"
+          echo "kernelversion=$V"
+          echo "$V" | grep -q '^6\.12\.38' || { echo "::error::Expected 6.12.38, got $V"; exit 1; }
+          git log -1 --format='%H %cI %s'
+          echo "$V" > "$GITHUB_WORKSPACE/kernelversion.txt"
+
+      - name: Restore bazel cache
+        if: inputs.use_cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/bazel
+          key: bazel-android16-6.12.38-${{ matrix.date }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            bazel-android16-6.12.38-${{ matrix.date }}-
+            bazel-android16-6.12.38-
+            bazel-
+
+      - name: Glibc >= 2.38 fix (resolve_btfids)
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          F="tools/bpf/resolve_btfids/Makefile"
+          if [ -f "$F" ] && grep -q 'OUTPUT=$(abspath $(dir $@))' "$F" && ! grep -q 'EXTRA_CFLAGS' "$F"; then
+            sed -i 's|OUTPUT=$(abspath $(dir $@))|EXTRA_CFLAGS="$(CFLAGS)" OUTPUT=$(abspath $(dir $@))|' "$F"
+            echo "resolve_btfids fix applied"
+          else
+            echo "resolve_btfids fix not needed"
+          fi
+
+      - name: Build baseline Image
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -euo pipefail
+          # Dual path like Wild: legacy build.sh or the newer bazel kleaf path.
+          sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
+          if [ -f "build/build.sh" ]; then
+            BUILD_GKI_ARTIFACTS="" \
+            BUILD_GKI_CERTIFICATION_TOOLS=0 \
+            BUILD_SYSTEM_DLKM=0 \
+            SKIP_VENDOR_BOOT=1 \
+            SKIP_EXT_MODULES=1 \
+            SKIP_CP_KERNEL_HDR=1 \
+            OUT_DIR="/home/runner/out" \
+            LTO=thin \
+            BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh -j"$(nproc)"
+          else
+            sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+            tools/bazel build --config=fast \
+              --disk_cache=/home/runner/.cache/bazel \
+              //common:kernel_aarch64/Image
+          fi
+
+      - name: Gather artifacts
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ -f "kernel/bazel-bin/common/kernel_aarch64/Image" ]; then
+            cp kernel/bazel-bin/common/kernel_aarch64/Image dist/Image
+          elif [ -f "/home/runner/out/dist/Image" ]; then
+            cp /home/runner/out/dist/Image dist/Image
+          else
+            echo "::error::Image not found; checked bazel-bin and out/dist"
+            exit 1
+          fi
+          cd kernel/common
+          SHA="$(git rev-parse HEAD)"
+          DATE="$(git log -1 --format=%cI)"
+          MSG="$(git log -1 --format=%s)"
+          cd "$GITHUB_WORKSPACE"
+          cat > dist/BuildInfo.txt <<EOF
+          version=6.12.38-android16-${{ matrix.date }}
+          manifest_branch=common-android16-6.12-${{ matrix.date }}
+          common_sha=$SHA
+          common_date=$DATE
+          common_msg=$MSG
+          baseline=stock (no KSU/SUSFS/tweaks)
+          EOF
+          cat dist/BuildInfo.txt
+
+      - name: Upload Image + BuildInfo
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-6.12.38-android16-${{ matrix.date }}
+          path: |
+            dist/Image
+            dist/BuildInfo.txt
+            kernelversion.txt
+          if-no-files-found: error
