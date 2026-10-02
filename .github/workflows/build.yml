@@ -1,7 +1,8 @@
 name: Build baseline
 
 # Baseline only: stock AOSP android16-6.12, pinned to common tag 6.12.38 + SPL 2025-09.
-# Direct shallow clone of kernel/common; no repo/manifest sync.
+# Repo/manifest sync for the full tree (common + build + prebuilts), then pin
+# kernel/common to the exact tag/SHA from config.
 # Manual trigger only; builds run in CI. No KSU, SUSFS, or tweaks.
 
 on:
@@ -27,6 +28,10 @@ on:
         description: "Force-load modules with mismatched symbol versions (Wild-style bypass)"
         type: boolean
         default: false
+      free_disk_space:
+        description: "Free disk space before build (disable to skip)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -38,7 +43,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: matrix
         shell: bash
         run: |
@@ -67,9 +72,10 @@ jobs:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
     name: "6.12.${{ matrix.sublevel }}-android16-${{ matrix.date }}"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Free disk space
+        if: inputs.free_disk_space
         uses: endersonmenezes/free-disk-space@v4
         with:
           remove_android: true
@@ -87,29 +93,44 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq git curl python3 jq ccache
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Sync pinned common source
+      - name: Sync kernel source (manifest) + pin common
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
           CONFIG="$GITHUB_WORKSPACE/.github/config/android16-6.12.json"
-          REMOTE="$(jq -r '.common_remote' "$CONFIG")"
           TAG="$(jq -r '.common_tag' "$CONFIG")"
           PINNED_SHA="$(jq -r '.common_sha // empty' "$CONFIG")"
+          BR="common-android16-6.12-${{ matrix.date }}"
           rm -rf kernel
-          mkdir -p kernel
+          mkdir -p kernel && cd kernel
           for i in 1 2 3; do
-            rm -rf kernel/common 2>/dev/null || true
-            if timeout 15m git clone --depth=1 --single-branch --filter=blob:none --branch="$TAG" "$REMOTE" kernel/common; then
-              echo "Clone OK (attempt $i)"
-              break
+            rm -rf .repo common build 2>/dev/null || true
+            if ~/bin/repo init -u https://android.googlesource.com/kernel/manifest \
+                -b "$BR" --depth=1; then
+              if timeout 15m ~/bin/repo sync -c --current-branch --no-clone-bundle --no-tags -j4; then
+                echo "Sync OK (attempt $i)"
+                break
+              fi
             fi
             echo "Attempt $i failed; retrying..."
             [ "$i" -eq 3 ] && exit 1
             sleep 15
           done
-          ACTUAL_SHA="$(git -C kernel/common rev-parse HEAD)"
+          cd common
+          git fetch --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          if [ -n "$PINNED_SHA" ]; then
+            git checkout "$PINNED_SHA"
+          else
+            git checkout "$TAG"
+          fi
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          echo "manifest_branch=$BR"
           echo "common_tag=$TAG"
           echo "common_sha=$ACTUAL_SHA"
           if [ -n "$PINNED_SHA" ] && [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
@@ -175,7 +196,7 @@ jobs:
 
       - name: Restore bazel cache
         if: inputs.use_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /home/runner/.cache/bazel
           key: bazel-android16-6.12.38-${{ matrix.date }}-${{ hashFiles('.github/workflows/build.yml') }}
@@ -252,6 +273,7 @@ jobs:
           common_msg=$MSG
           brand_name=${{ inputs.brand_name }}
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
+          free_disk_space=${{ inputs.free_disk_space }}
           baseline=stock (no KSU/SUSFS/tweaks)
           EOF
           cat dist/BuildInfo.txt
