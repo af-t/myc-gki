@@ -1,6 +1,7 @@
 name: Build baseline
 
-# Baseline only: stock AOSP android16-6.12, pinned to 6.12.38 + SPL 2025-09/2025-10.
+# Baseline only: stock AOSP android16-6.12, pinned to common tag 6.12.38 + SPL 2025-09.
+# Direct shallow clone of kernel/common; no repo/manifest sync.
 # Manual trigger only; builds run in CI. No KSU, SUSFS, or tweaks.
 
 on:
@@ -12,12 +13,20 @@ on:
         options:
           - All
           - 2025-09
-          - 2025-10
-        default: All
+        default: 2025-09
       use_cache:
         description: "Enable bazel cache (actions/cache)"
         type: boolean
         default: true
+      brand_name:
+        description: "Optional kernel branding. Empty keeps the stock GKI version."
+        type: string
+        default: ""
+        required: false
+      allow_version_mismatch:
+        description: "Force-load modules with mismatched symbol versions (Wild-style bypass)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,48 +81,41 @@ jobs:
           remove_packages_one_command: true
           remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
 
-      - name: Install repo tool + deps
+      - name: Install build deps
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq git curl python3 jq ccache
-          mkdir -p ~/bin
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod +x ~/bin/repo
-          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Preflight branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          BR="common-android16-6.12-${{ matrix.date }}"
-          echo "Checking manifest branch: $BR"
-          if ! git ls-remote https://android.googlesource.com/kernel/manifest "refs/heads/$BR" | grep -q .; then
-            echo "::error::Branch $BR does not exist in AOSP. Available branches are currently 2025-08 and 2025-09 (both 6.12.38). Choose 2025-09 or wait for Google to publish 2025-10."
-            exit 22
-          fi
-          echo "Branch $BR is available."
-
-      - name: Sync kernel source (shallow)
+      - name: Sync pinned common source
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          mkdir -p kernel && cd kernel
+          CONFIG="$GITHUB_WORKSPACE/.github/config/android16-6.12.json"
+          REMOTE="$(jq -r '.common_remote' "$CONFIG")"
+          TAG="$(jq -r '.common_tag' "$CONFIG")"
+          PINNED_SHA="$(jq -r '.common_sha // empty' "$CONFIG")"
+          rm -rf kernel
+          mkdir -p kernel
           for i in 1 2 3; do
-            rm -rf .repo common build 2>/dev/null || true
-            if ~/bin/repo init -u https://android.googlesource.com/kernel/manifest \
-                -b common-android16-6.12-${{ matrix.date }} --depth=1; then
-              if timeout 15m ~/bin/repo sync -c --current-branch --no-clone-bundle --no-tags -j4; then
-                echo "Sync OK (attempt $i)"
-                break
-              fi
+            rm -rf kernel/common 2>/dev/null || true
+            if timeout 15m git clone --depth=1 --single-branch --filter=blob:none --branch="$TAG" "$REMOTE" kernel/common; then
+              echo "Clone OK (attempt $i)"
+              break
             fi
             echo "Attempt $i failed; retrying..."
             [ "$i" -eq 3 ] && exit 1
             sleep 15
           done
+          ACTUAL_SHA="$(git -C kernel/common rev-parse HEAD)"
+          echo "common_tag=$TAG"
+          echo "common_sha=$ACTUAL_SHA"
+          if [ -n "$PINNED_SHA" ] && [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
+            echo "::error::Pinned source mismatch: expected $PINNED_SHA, got $ACTUAL_SHA" >&2
+            exit 1
+          fi
 
       - name: Verify pin 6.12.38
         shell: bash
@@ -125,6 +127,51 @@ jobs:
           echo "$V" | grep -q '^6\.12\.38' || { echo "::error::Expected 6.12.38, got $V"; exit 1; }
           git log -1 --format='%H %cI %s'
           echo "$V" > "$GITHUB_WORKSPACE/kernelversion.txt"
+
+      - name: Apply optional kernel branding
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          BRAND="${{ inputs.brand_name }}"
+          if [ -z "$BRAND" ]; then
+            echo "brand_name is empty; keeping the stock kernel version"
+            exit 0
+          fi
+          ANDROID_PART="$(jq -r '.version | split("-")[0]' .github/config/android16-6.12.json)"
+          KERNEL_PART="$(jq -r '.version | split("-")[1]' .github/config/android16-6.12.json)"
+          KMI="$(grep -h '^KMI_GENERATION' kernel/common/build.config.common kernel/common/build.config.constants 2>/dev/null | head -n 1 | cut -d= -f2 || true)"
+          if [ -z "$KMI" ]; then
+            echo "::error::KMI_GENERATION not found; cannot apply KMI-preserving branding" >&2
+            exit 1
+          fi
+          SL="kernel/common/scripts/setlocalversion"
+          if ! grep -q 'scm_version}"' "$SL"; then
+            echo "::error::Unexpected scripts/setlocalversion format" >&2
+            exit 1
+          fi
+          sed -i '$d' "$SL"
+          echo "echo \"$KERNEL_PART.${{ matrix.sublevel }}-$ANDROID_PART-$KMI-$BRAND\"" >> "$SL"
+          chmod +x "$SL"
+          tail -n 1 "$SL"
+
+      - name: Apply version-mismatch bypass
+        if: ${{ inputs.allow_version_mismatch == 'true' }}
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -euo pipefail
+          TARGET="kernel/module/version.c"
+          if [ ! -f "$TARGET" ]; then
+            TARGET="kernel/module.c"
+          fi
+          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET"
+          if ! grep -A 5 'bad_version:' "$TARGET" | grep -q 'return 1;'; then
+            echo "::error::Bypass patch failed; 'return 1;' not found at bad_version" >&2
+            grep -A 10 'bad_version:' "$TARGET" || true
+            exit 1
+          fi
+          echo "Version-mismatch bypass applied to $TARGET"
 
       - name: Restore bazel cache
         if: inputs.use_cache
@@ -194,12 +241,17 @@ jobs:
           DATE="$(git log -1 --format=%cI)"
           MSG="$(git log -1 --format=%s)"
           cd "$GITHUB_WORKSPACE"
+          TAG="$(jq -r '.common_tag' .github/config/android16-6.12.json)"
+          REMOTE="$(jq -r '.common_remote' .github/config/android16-6.12.json)"
           cat > dist/BuildInfo.txt <<EOF
           version=6.12.38-android16-${{ matrix.date }}
-          manifest_branch=common-android16-6.12-${{ matrix.date }}
+          common_remote=$REMOTE
+          common_tag=$TAG
           common_sha=$SHA
           common_date=$DATE
           common_msg=$MSG
+          brand_name=${{ inputs.brand_name }}
+          allow_version_mismatch=${{ inputs.allow_version_mismatch }}
           baseline=stock (no KSU/SUSFS/tweaks)
           EOF
           cat dist/BuildInfo.txt

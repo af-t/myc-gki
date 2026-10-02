@@ -2,15 +2,13 @@
   "version": "android16-6.12",
   "kernel": "6.12",
   "sublevel": "38",
+  "common_remote": "https://android.googlesource.com/kernel/common",
+  "common_tag": "android16-6.12-2025-09_r38",
+  "common_sha": "98d5b9e071f1828ec75981d3758cc20c452616a3",
   "include": [
     {
       "sublevel": "38",
       "date": "2025-09"
-    },
-    {
-      "sublevel": "38",
-      "date": "2025-10",
-      "note": "Branch not yet published in AOSP when the repository was created; the workflow fails with a clear message until the branch is available."
     }
   ]
 }
