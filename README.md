@@ -10,7 +10,7 @@ Pinned: `6.12.38` with SPL `2025-09`, cloned directly from `kernel/common` tag `
 1. Open **Actions** -> **Build baseline**.
 2. Select **Run workflow** -> choose `spl`: `All` or `2025-09` (`2025-09` is the default).
 3. Leave `brand_name` empty to keep the stock GKI version string.
-4. Leave `allow_version_mismatch` off unless testing an external module built against another kernel.
+4. `allow_version_mismatch` is on by default so modules ported from Wild can load despite symbol version differences.
 5. Download the result from **Artifacts**: `Image-6.12.38-android16-<spl>` and `BuildInfo`.
 
 ## Repository contents

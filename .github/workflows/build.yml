@@ -27,11 +27,19 @@ on:
       allow_version_mismatch:
         description: "Force-load modules with mismatched symbol versions (Wild-style bypass)"
         type: boolean
-        default: false
+        default: true
       free_disk_space:
         description: "Free disk space before build (disable to skip)"
         type: boolean
         default: true
+      build_method:
+        description: "Build method (auto prefers build.sh, falls back to kleaf)"
+        type: choice
+        options:
+          - auto
+          - kleaf
+          - build.sh
+        default: auto
 
 permissions:
   contents: read
@@ -156,24 +164,31 @@ jobs:
         run: |
           set -euo pipefail
           BRAND="${{ inputs.brand_name }}"
-          if [ -z "$BRAND" ]; then
-            echo "brand_name is empty; keeping the stock kernel version"
-            exit 0
-          fi
-          ANDROID_PART="$(jq -r '.version | split("-")[0]' .github/config/android16-6.12.json)"
-          KERNEL_PART="$(jq -r '.version | split("-")[1]' .github/config/android16-6.12.json)"
-          KMI="$(grep -h '^KMI_GENERATION' kernel/common/build.config.common kernel/common/build.config.constants 2>/dev/null | head -n 1 | cut -d= -f2 || true)"
-          if [ -z "$KMI" ]; then
-            echo "::error::KMI_GENERATION not found; cannot apply KMI-preserving branding" >&2
-            exit 1
-          fi
           SL="kernel/common/scripts/setlocalversion"
           if ! grep -q 'scm_version}"' "$SL"; then
             echo "::error::Unexpected scripts/setlocalversion format" >&2
             exit 1
           fi
           sed -i '$d' "$SL"
-          echo "echo \"$KERNEL_PART.${{ matrix.sublevel }}-$ANDROID_PART-$KMI-$BRAND\"" >> "$SL"
+          if [ -z "$BRAND" ]; then
+            # Empty brand keeps the stock version, but the tree is always dirty
+            # at this point (CI patches), and setlocalversion would append
+            # -dirty to uname -r. Pin the stock version string so the build
+            # stays identical to a clean-tree build.
+            cat >> "$SL" <<'EOF'
+          echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}$(scm_version | sed 's/-dirty$//')"
+          EOF
+            echo "brand_name is empty; stock version pinned without -dirty suffix"
+          else
+            ANDROID_PART="$(jq -r '.version | split("-")[0]' .github/config/android16-6.12.json)"
+            KERNEL_PART="$(jq -r '.version | split("-")[1]' .github/config/android16-6.12.json)"
+            KMI="$(grep -h '^KMI_GENERATION' kernel/common/build.config.common kernel/common/build.config.constants 2>/dev/null | head -n 1 | cut -d= -f2 || true)"
+            if [ -z "$KMI" ]; then
+              echo "::error::KMI_GENERATION not found; cannot apply KMI-preserving branding" >&2
+              exit 1
+            fi
+            echo "echo \"$KERNEL_PART.${{ matrix.sublevel }}-$ANDROID_PART-$KMI-$BRAND\"" >> "$SL"
+          fi
           chmod +x "$SL"
           tail -n 1 "$SL"
 
@@ -206,6 +221,17 @@ jobs:
             bazel-android16-6.12.38-
             bazel-
 
+      - name: Restore out cache (build.sh only)
+        if: inputs.use_cache && (inputs.build_method == 'build.sh' || inputs.build_method == 'auto')
+        uses: actions/cache@v6
+        with:
+          path: /home/runner/out
+          key: out-android16-6.12.38-${{ matrix.date }}-${{ hashFiles('.github/workflows/build.yml', '.github/config/android16-6.12.json') }}
+          restore-keys: |
+            out-android16-6.12.38-${{ matrix.date }}-
+            out-android16-6.12.38-
+            out-
+
       - name: Glibc >= 2.38 fix (resolve_btfids)
         shell: bash
         working-directory: ${{ github.workspace }}/kernel/common
@@ -224,9 +250,17 @@ jobs:
         working-directory: ${{ github.workspace }}/kernel
         run: |
           set -euo pipefail
-          # Dual path like Wild: legacy build.sh or the newer bazel kleaf path.
+          # Build method selectable via the build_method input.
+          # auto keeps the old dual-path behavior: legacy build.sh when present,
+          # otherwise the bazel kleaf path.
+          METHOD="${{ inputs.build_method }}"
+          if [ "$METHOD" = "auto" ]; then
+            if [ -f "build/build.sh" ]; then METHOD="build.sh"; else METHOD="kleaf"; fi
+          fi
+          echo "build_method=$METHOD"
           sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
-          if [ -f "build/build.sh" ]; then
+          if [ "$METHOD" = "build.sh" ]; then
+            [ -f "build/build.sh" ] || { echo "::error::build/build.sh not found for build_method=build.sh" >&2; exit 1; }
             BUILD_GKI_ARTIFACTS="" \
             BUILD_GKI_CERTIFICATION_TOOLS=0 \
             BUILD_SYSTEM_DLKM=0 \
@@ -237,11 +271,14 @@ jobs:
             LTO=thin \
             BUILD_CONFIG=common/build.config.gki.aarch64 \
             build/build.sh -j"$(nproc)"
-          else
+          elif [ "$METHOD" = "kleaf" ]; then
             sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
             tools/bazel build --config=fast \
               --disk_cache=/home/runner/.cache/bazel \
               //common:kernel_aarch64/Image
+          else
+            echo "::error::Unknown build_method: $METHOD (expected auto, kleaf, or build.sh)" >&2
+            exit 1
           fi
 
       - name: Gather artifacts
@@ -275,6 +312,7 @@ jobs:
           brand_name=${{ inputs.brand_name }}
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
           free_disk_space=${{ inputs.free_disk_space }}
+          build_method=${{ inputs.build_method }}
           baseline=stock (no KSU/SUSFS/tweaks)
           EOF
           cat dist/BuildInfo.txt
