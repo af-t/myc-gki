@@ -33,13 +33,16 @@ on:
         type: boolean
         default: true
       build_method:
-        description: "Build method (auto prefers build.sh, falls back to kleaf)"
+        description: "Build method (kleaf via tools/bazel; auto kept for compatibility)"
         type: choice
         options:
           - auto
           - kleaf
-          - build.sh
         default: auto
+      remove_protected_exports:
+        description: "Remove GKI protected exports so vendor modules can load (Wild-style)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -221,17 +224,6 @@ jobs:
             bazel-android16-6.12.38-
             bazel-
 
-      - name: Restore out cache (build.sh only)
-        if: inputs.use_cache && (inputs.build_method == 'build.sh' || inputs.build_method == 'auto')
-        uses: actions/cache@v6
-        with:
-          path: /home/runner/out
-          key: out-android16-6.12.38-${{ matrix.date }}-${{ hashFiles('.github/workflows/build.yml', '.github/config/android16-6.12.json') }}
-          restore-keys: |
-            out-android16-6.12.38-${{ matrix.date }}-
-            out-android16-6.12.38-
-            out-
-
       - name: Glibc >= 2.38 fix (resolve_btfids)
         shell: bash
         working-directory: ${{ github.workspace }}/kernel/common
@@ -245,41 +237,59 @@ jobs:
             echo "resolve_btfids fix not needed"
           fi
 
+      - name: Remove protected exports (Wild-style)
+        if: inputs.remove_protected_exports
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -euo pipefail
+          # Vendor modules (e.g. rfkill, cfg80211) are rejected at load time
+          # with "exports protected symbol" while the GKI protected lists are
+          # in place. Strip them like Wild does so those modules can load.
+          rm -rf common/android/abi_gki_protected_exports_*
+          if ls -1 common/android/abi_gki_protected_exports_* >/dev/null 2>&1; then
+            echo "::error::abi_gki_protected_exports_* still present after removal" >&2
+            ls -la common/android/abi_gki_protected_exports_* || true
+            exit 1
+          fi
+          if grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports_aarch64"' common/BUILD.bazel; then
+            BEFORE="$(sha256sum common/BUILD.bazel | awk '{print $1}')"
+            perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
+            AFTER="$(sha256sum common/BUILD.bazel | awk '{print $1}')"
+            [ "$BEFORE" != "$AFTER" ] || { echo "::error::common/BUILD.bazel was not modified" >&2; exit 1; }
+            grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports_aarch64"' common/BUILD.bazel && { echo "::error::protected_exports_list still referenced" >&2; exit 1; }
+          fi
+          if grep -q '^protected_modules = ' common/modules.bzl; then
+            BEFORE="$(sha256sum common/modules.bzl | awk '{print $1}')"
+            sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl
+            AFTER="$(sha256sum common/modules.bzl | awk '{print $1}')"
+            [ "$BEFORE" != "$AFTER" ] || { echo "::error::common/modules.bzl was not modified" >&2; exit 1; }
+            grep -q '^protected_modules = \[\]' common/modules.bzl || { echo "::error::protected_modules was not reset" >&2; exit 1; }
+          fi
+          if grep -q 'protected_module_names_list' common/BUILD.bazel; then
+            perl -pi -e 's/^\s*protected_module_names_list\s*=\s*":gki_(?:aarch64|x86_64)_protected_module_names",\s*$//;' common/BUILD.bazel
+            grep -q 'protected_module_names_list' common/BUILD.bazel && { echo "::error::protected_module_names_list still referenced" >&2; exit 1; }
+          fi
+          echo "Protected exports removed"
+
       - name: Build baseline Image
         shell: bash
         working-directory: ${{ github.workspace }}/kernel
         run: |
           set -euo pipefail
-          # Build method selectable via the build_method input.
-          # auto keeps the old dual-path behavior: legacy build.sh when present,
-          # otherwise the bazel kleaf path.
+          # android16-6.12 builds via Kleaf only: the kernel manifest carries
+          # no build/build.sh on this branch, so there is no legacy path.
           METHOD="${{ inputs.build_method }}"
-          if [ "$METHOD" = "auto" ]; then
-            if [ -f "build/build.sh" ]; then METHOD="build.sh"; else METHOD="kleaf"; fi
-          fi
-          echo "build_method=$METHOD"
-          sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
-          if [ "$METHOD" = "build.sh" ]; then
-            [ -f "build/build.sh" ] || { echo "::error::build/build.sh not found for build_method=build.sh" >&2; exit 1; }
-            BUILD_GKI_ARTIFACTS="" \
-            BUILD_GKI_CERTIFICATION_TOOLS=0 \
-            BUILD_SYSTEM_DLKM=0 \
-            SKIP_VENDOR_BOOT=1 \
-            SKIP_EXT_MODULES=1 \
-            SKIP_CP_KERNEL_HDR=1 \
-            OUT_DIR="/home/runner/out" \
-            LTO=thin \
-            BUILD_CONFIG=common/build.config.gki.aarch64 \
-            build/build.sh -j"$(nproc)"
-          elif [ "$METHOD" = "kleaf" ]; then
-            sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
-            tools/bazel build --config=fast \
-              --disk_cache=/home/runner/.cache/bazel \
-              //common:kernel_aarch64/Image
-          else
-            echo "::error::Unknown build_method: $METHOD (expected auto, kleaf, or build.sh)" >&2
+          if [ "$METHOD" != "auto" ] && [ "$METHOD" != "kleaf" ]; then
+            echo "::error::Unknown build_method: $METHOD (expected auto or kleaf)" >&2
             exit 1
           fi
+          echo "build_method=$METHOD (kleaf)"
+          sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
+          sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+          tools/bazel build --config=fast \
+            --disk_cache=/home/runner/.cache/bazel \
+            //common:kernel_aarch64/Image
 
       - name: Gather artifacts
         shell: bash
@@ -313,6 +323,7 @@ jobs:
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
           free_disk_space=${{ inputs.free_disk_space }}
           build_method=${{ inputs.build_method }}
+          remove_protected_exports=${{ inputs.remove_protected_exports }}
           baseline=stock (no KSU/SUSFS/tweaks)
           EOF
           cat dist/BuildInfo.txt
