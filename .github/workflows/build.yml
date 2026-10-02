@@ -1,9 +1,9 @@
-name: Build baseline
+name: Build kernel
 
-# Baseline only: stock AOSP android16-6.12, pinned to common tag 6.12.38 + SPL 2025-09.
-# Repo/manifest sync for the full tree (common + build + prebuilts), then pin
-# kernel/common to the exact tag/SHA from config.
-# Manual trigger only; builds run in CI. No KSU, SUSFS, or tweaks.
+# Personal GKI build: stock AOSP android16-6.12, pinned to common tag 6.12.38 + SPL 2025-09.
+# Repo/manifest sync for the full tree, then pin kernel/common to the config tag/SHA.
+# Optional root (KSU variants) and SUSFS via workflow inputs; default is unrooted.
+# Manual trigger only; builds run in CI.
 
 on:
   workflow_dispatch:
@@ -17,6 +17,10 @@ on:
         default: 2025-09
       use_cache:
         description: "Enable bazel cache (actions/cache)"
+        type: boolean
+        default: true
+      use_source_cache:
+        description: "Reuse synced kernel source via actions/cache"
         type: boolean
         default: true
       brand_name:
@@ -43,6 +47,20 @@ on:
         description: "Remove GKI protected exports so vendor modules can load (Wild-style)"
         type: boolean
         default: true
+      root_flavor:
+        description: "Root implementation (baseline = no root)"
+        type: choice
+        options:
+          - baseline
+          - ksu
+          - ksunext
+          - sukisu-ultra
+          - resukisu
+        default: baseline
+      with_susfs:
+        description: "Apply SUSFS root-hiding patches (requires a root flavor)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -98,6 +116,16 @@ jobs:
           remove_packages_one_command: true
           remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
 
+      - name: Restore kernel source cache
+        id: restore-kernel
+        if: inputs.use_source_cache
+        uses: actions/cache/restore@v6
+        with:
+          path: kernel
+          key: kernel-src-android16-6.12-${{ matrix.sublevel }}-${{ matrix.date }}-${{ hashFiles('.github/config/android16-6.12.json') }}
+          restore-keys: |
+            kernel-src-android16-6.12-${{ matrix.sublevel }}-${{ matrix.date }}-
+
       - name: Install build deps
         shell: bash
         run: |
@@ -112,6 +140,8 @@ jobs:
       - name: Sync kernel source (manifest) + pin common
         shell: bash
         working-directory: ${{ github.workspace }}
+        env:
+          USE_SOURCE_CACHE: ${{ inputs.use_source_cache }}
         run: |
           set -euo pipefail
           CONFIG="$GITHUB_WORKSPACE/.github/config/android16-6.12.json"
@@ -119,21 +149,46 @@ jobs:
           TAG="$(jq -r '.common_tag' "$CONFIG")"
           PINNED_SHA="$(jq -r '.common_sha // empty' "$CONFIG")"
           BR="common-android16-6.12-${{ matrix.date }}"
-          rm -rf kernel
+          REUSE=0
+          if [ "${USE_SOURCE_CACHE:-}" = "true" ] && [ -d kernel/.repo ]; then
+            REUSE=1
+            echo "Reusing cached kernel source"
+          else
+            rm -rf kernel
+          fi
           mkdir -p kernel && cd kernel
-          for i in 1 2 3; do
-            rm -rf .repo common build 2>/dev/null || true
-            if ~/bin/repo init -u https://android.googlesource.com/kernel/manifest \
-                -b "$BR" --depth=1; then
+          SYNCED=0
+          if [ "$REUSE" -eq 1 ]; then
+            for i in 1 2 3; do
               if timeout 15m ~/bin/repo sync -c --current-branch --no-clone-bundle --no-tags -j4; then
-                echo "Sync OK (attempt $i)"
+                echo "Sync OK (cached source, attempt $i)"
+                SYNCED=1
                 break
               fi
+              echo "Cached sync attempt $i failed; retrying..."
+              [ "$i" -eq 3 ] || sleep 15
+            done
+            if [ "$SYNCED" -ne 1 ]; then
+              echo "Cached source did not sync; discarding it and cloning fresh"
+              rm -rf .repo common build 2>/dev/null || true
+              REUSE=0
             fi
-            echo "Attempt $i failed; retrying..."
-            [ "$i" -eq 3 ] && exit 1
-            sleep 15
-          done
+          fi
+          if [ "$REUSE" -eq 0 ]; then
+            for i in 1 2 3; do
+              rm -rf .repo common build 2>/dev/null || true
+              if ~/bin/repo init -u https://android.googlesource.com/kernel/manifest \
+                  -b "$BR" --depth=1; then
+                if timeout 15m ~/bin/repo sync -c --current-branch --no-clone-bundle --no-tags -j4; then
+                  echo "Sync OK (fresh clone, attempt $i)"
+                  break
+                fi
+              fi
+              echo "Attempt $i failed; retrying..."
+              [ "$i" -eq 3 ] && exit 1
+              sleep 15
+            done
+          fi
           cd common
           git fetch --depth=1 "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG"
           if [ -n "$PINNED_SHA" ]; then
@@ -149,6 +204,13 @@ jobs:
             echo "::error::Pinned source mismatch: expected $PINNED_SHA, got $ACTUAL_SHA" >&2
             exit 1
           fi
+
+      - name: Save kernel source cache
+        if: inputs.use_source_cache && steps.restore-kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: kernel
+          key: kernel-src-android16-6.12-${{ matrix.sublevel }}-${{ matrix.date }}-${{ hashFiles('.github/config/android16-6.12.json') }}
 
       - name: Verify pin 6.12.38
         shell: bash
@@ -174,10 +236,7 @@ jobs:
           fi
           sed -i '$d' "$SL"
           if [ -z "$BRAND" ]; then
-            # Empty brand keeps the stock version, but the tree is always dirty
-            # at this point (CI patches), and setlocalversion would append
-            # -dirty to uname -r. Pin the stock version string so the build
-            # stays identical to a clean-tree build.
+            # Empty brand pins the stock version string.
             cat >> "$SL" <<'EOF'
           echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}$(scm_version | sed 's/-dirty$//')"
           EOF
@@ -243,9 +302,6 @@ jobs:
         working-directory: ${{ github.workspace }}/kernel
         run: |
           set -euo pipefail
-          # Vendor modules (e.g. rfkill, cfg80211) are rejected at load time
-          # with "exports protected symbol" while the GKI protected lists are
-          # in place. Strip them like Wild does so those modules can load.
           rm -rf common/android/abi_gki_protected_exports_*
           if ls -1 common/android/abi_gki_protected_exports_* >/dev/null 2>&1; then
             echo "::error::abi_gki_protected_exports_* still present after removal" >&2
@@ -272,13 +328,197 @@ jobs:
           fi
           echo "Protected exports removed"
 
-      - name: Build baseline Image
+      - name: Setup root implementation
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        env:
+          ROOT_FLAVOR: ${{ inputs.root_flavor }}
+          WITH_SUSFS: ${{ inputs.with_susfs }}
+        run: |
+          set -euo pipefail
+          if [ "$ROOT_FLAVOR" = "baseline" ]; then
+            if [ "$WITH_SUSFS" = "true" ]; then
+              echo "::error::with_susfs requires a root flavor; baseline carries no KSU source to attach SUSFS to" >&2
+              exit 1
+            fi
+            echo "baseline selected; skipping root integration"
+            exit 0
+          fi
+          case "$ROOT_FLAVOR" in
+            ksu)
+              REPO="https://github.com/tiann/KernelSU.git"
+              BRANCH="main"
+              DIR="KernelSU"
+              ;;
+            ksunext)
+              DIR="KernelSU-Next"
+              if [ "$WITH_SUSFS" = "true" ]; then
+                REPO="https://github.com/pershoot/KernelSU-Next.git"
+                BRANCH="dev-susfs"
+              else
+                REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
+                BRANCH="dev"
+              fi
+              ;;
+            sukisu-ultra)
+              REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
+              DIR="SukiSU-Ultra"
+              if [ "$WITH_SUSFS" = "true" ]; then
+                BRANCH="builtin"
+              else
+                BRANCH="main"
+              fi
+              ;;
+            resukisu)
+              REPO="https://github.com/ReSukiSU/ReSukiSU.git"
+              BRANCH="main"
+              DIR="ReSukiSU"
+              ;;
+            *)
+              echo "::error::unknown root_flavor: $ROOT_FLAVOR" >&2
+              exit 1
+              ;;
+          esac
+          for CAND in KernelSU KernelSU-Next ReSukiSU SukiSU-Ultra; do
+            if [ "$CAND" != "$DIR" ] && [ -e "$CAND" ]; then
+              echo "::error::refusing mixed root implementations: found $CAND" >&2
+              exit 1
+            fi
+          done
+          if [ -e common/drivers/kernelsu ] || [ -L common/drivers/kernelsu ]; then
+            echo "::error::refusing to replace an existing kernelsu integration" >&2
+            exit 1
+          fi
+          SHA="$(git ls-remote "$REPO" "refs/heads/$BRANCH" | awk '{print $1; exit}')"
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::failed to resolve $REPO@$BRANCH (got: ${SHA:-empty})" >&2
+            exit 1
+          fi
+          git clone --no-checkout "$REPO" "$DIR"
+          git -C "$DIR" fetch --depth=1 origin "$SHA"
+          git -C "$DIR" checkout --detach "$SHA"
+          [ "$(git -C "$DIR" rev-parse HEAD)" = "$SHA" ] || { echo "::error::root commit mismatch" >&2; exit 1; }
+          [ -f "$DIR/kernel/Kconfig" ] && [ -f "$DIR/kernel/Makefile" ] || { echo "::error::$DIR@$BRANCH@$SHA has no kernel integration" >&2; exit 1; }
+          REL="$(realpath --relative-to=common/drivers "$PWD/$DIR/kernel")"
+          ln -s "$REL" common/drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' common/drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> common/drivers/Makefile
+          [ "$(grep -c '^endmenu' common/drivers/Kconfig)" = "1" ] || { echo "::error::unexpected endmenu count in common/drivers/Kconfig" >&2; exit 1; }
+          grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
+          grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || { echo "::error::Kconfig wiring failed" >&2; exit 1; }
+          DEF="common/arch/arm64/configs/gki_defconfig"
+          grep -q '^CONFIG_KSU=y$' "$DEF" || echo 'CONFIG_KSU=y' >> "$DEF"
+          if [ "$ROOT_FLAVOR" = "ksunext" ]; then
+            if grep -q 'KernelSU requires either CONFIG_KPROBES' common/drivers/kernelsu/Kbuild 2>/dev/null; then
+              sed -i 's/$(error "KernelSU requires either CONFIG_KPROBES=y or CONFIG_KSU_SUSFS=y")/$(warning "KernelSU requires either CONFIG_KPROBES=y or CONFIG_KSU_SUSFS=y")/' common/drivers/kernelsu/Kbuild
+            fi
+          fi
+          if [ "$ROOT_FLAVOR" = "resukisu" ]; then
+            grep -q '^CONFIG_KSU_MULTI_MANAGER_SUPPORT=n$' "$DEF" || echo 'CONFIG_KSU_MULTI_MANAGER_SUPPORT=n' >> "$DEF"
+            grep -q '^CONFIG_KSU_TOOLKIT_SUPPORT=y$' "$DEF" || echo 'CONFIG_KSU_TOOLKIT_SUPPORT=y' >> "$DEF"
+            if grep -q 'as a git submodule instead of copying code directly' "$DIR/kernel/Kbuild" 2>/dev/null; then
+              sed -i 's/$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)/$(warning You should use $(REPO_NAME) as a git submodule instead of copying code directly)/' "$DIR/kernel/Kbuild"
+            fi
+          fi
+          echo "root_flavor=$ROOT_FLAVOR root_repo=$REPO root_branch=$BRANCH root_commit=$SHA"
+          echo "ROOT_COMMIT=$SHA" >> "$GITHUB_ENV"
+
+      - name: Apply SUSFS patches
+        if: inputs.with_susfs
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ROOT_FLAVOR: ${{ inputs.root_flavor }}
+        run: |
+          set -euo pipefail
+          BRANCH="gki-android16-6.12"
+          git clone --depth=1 -b "$BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+          SHA="$(git -C susfs4ksu rev-parse HEAD)"
+          echo "susfs_branch=$BRANCH susfs_commit=$SHA"
+          echo "SUSFS_COMMIT=$SHA" >> "$GITHUB_ENV"
+          if [ "$ROOT_FLAVOR" = "ksu" ]; then
+            PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+            [ -f "$PATCH" ] || { echo "::error::missing $PATCH" >&2; exit 1; }
+            patch --forward -p1 -d kernel/KernelSU < "$PATCH"
+          fi
+          DEF="kernel/common/arch/arm64/configs/gki_defconfig"
+          while IFS= read -r LINE; do
+            [ -n "$LINE" ] || continue
+            KEY="${LINE%%=*}"
+            if grep -q "^$KEY=" "$DEF"; then
+              sed -i "s|^$KEY=.*|$LINE|" "$DEF"
+            else
+              echo "$LINE" >> "$DEF"
+            fi
+          done <<'OPTS'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          OPTS
+          cp -a susfs4ksu/kernel_patches/fs/. kernel/common/fs/
+          cp -a susfs4ksu/kernel_patches/include/linux/. kernel/common/include/linux/
+          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch kernel/common/
+          patch --forward -p1 -d kernel/common < kernel/common/50_add_susfs_in_gki-android16-6.12.patch
+          if grep -q 'VMA_PAD_START(' kernel/common/fs/proc/task_mmu.c && ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' kernel/common/fs/proc/task_mmu.c; then
+            sed -i '1a #ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif' kernel/common/fs/proc/task_mmu.c
+          fi
+          FOUND="$(find kernel/common -name selinux_hide.c 2>/dev/null || true)"
+          [ -n "$FOUND" ] || echo "::warning::selinux_hide.c not found under kernel/common; skipping pointer fix"
+          for F in $FOUND; do
+            if grep -q "extern void security_dump_masked_av_fn" "$F"; then
+              sed -i 's/if (security_dump_masked_av_fn)/if (\&security_dump_masked_av_fn)/g' "$F"
+              sed -i 's/if (security_dump_masked_av_fn != NULL)/if (\&security_dump_masked_av_fn != NULL)/g' "$F"
+              sed -i 's/if (context_struct_compute_av_fn)/if (\&context_struct_compute_av_fn)/g' "$F"
+              sed -i 's/if (context_struct_compute_av_fn != NULL)/if (\&context_struct_compute_av_fn != NULL)/g' "$F"
+              echo "patched $F (function form)"
+            elif grep -q "if (security_dump_masked_av_fn" "$F"; then
+              sed -i 's/if (security_dump_masked_av_fn)/if (security_dump_masked_av_fn != NULL)/g' "$F"
+              sed -i 's/if (context_struct_compute_av_fn)/if (context_struct_compute_av_fn != NULL)/g' "$F"
+              echo "patched $F (pointer form)"
+            else
+              echo "$F already patched"
+            fi
+          done
+          echo "SUSFS applied"
+
+      - name: Apply config fragment
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          FRAG="configs/baseline.fragment"
+          DEF="kernel/common/arch/arm64/configs/gki_defconfig"
+          [ -f "$DEF" ] || { echo "::error::$DEF not found" >&2; exit 1; }
+          BAD="$(grep -vE '^\s*(#|$)' "$FRAG" | grep -vE '^CONFIG_[A-Za-z0-9_]+=.+' || true)"
+          [ -z "$BAD" ] || { echo "::error::malformed fragment lines:" >&2; echo "$BAD" >&2; exit 1; }
+          OPTS="$(grep -vE '^\s*(#|$)' "$FRAG" || true)"
+          if [ -n "$OPTS" ]; then
+            while IFS= read -r LINE; do
+              KEY="${LINE%%=*}"
+              if grep -q "^$KEY=" "$DEF"; then
+                sed -i "s|^$KEY=.*|$LINE|" "$DEF"
+              else
+                echo "$LINE" >> "$DEF"
+              fi
+            done <<< "$OPTS"
+            echo "fragment applied:"
+            echo "$OPTS"
+          else
+            echo "fragment empty; nothing to apply"
+          fi
+
+      - name: Build kernel Image
         shell: bash
         working-directory: ${{ github.workspace }}/kernel
         run: |
           set -euo pipefail
-          # android16-6.12 builds via Kleaf only: the kernel manifest carries
-          # no build/build.sh on this branch, so there is no legacy path.
+          # Kleaf-only: this manifest branch has no build/build.sh.
           METHOD="${{ inputs.build_method }}"
           if [ "$METHOD" != "auto" ] && [ "$METHOD" != "kleaf" ]; then
             echo "::error::Unknown build_method: $METHOD (expected auto or kleaf)" >&2
@@ -294,6 +534,9 @@ jobs:
       - name: Gather artifacts
         shell: bash
         working-directory: ${{ github.workspace }}
+        env:
+          ROOT_FLAVOR: ${{ inputs.root_flavor }}
+          WITH_SUSFS: ${{ inputs.with_susfs }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -312,6 +555,12 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           TAG="$(jq -r '.common_tag' .github/config/android16-6.12.json)"
           REMOTE="$(jq -r '.common_remote' .github/config/android16-6.12.json)"
+          FRAG_SHA="$(sha256sum configs/baseline.fragment | awk '{print $1}')"
+          NOTES="stock (no root, no tweaks)"
+          if [ "$ROOT_FLAVOR" != "baseline" ]; then
+            NOTES="$ROOT_FLAVOR"
+            [ "$WITH_SUSFS" = "true" ] && NOTES="$NOTES+susfs"
+          fi
           cat > dist/BuildInfo.txt <<EOF
           version=6.12.38-android16-${{ matrix.date }}
           common_remote=$REMOTE
@@ -319,12 +568,18 @@ jobs:
           common_sha=$SHA
           common_date=$DATE
           common_msg=$MSG
+          config_fragment=$FRAG_SHA
           brand_name=${{ inputs.brand_name }}
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
+          use_source_cache=${{ inputs.use_source_cache }}
           free_disk_space=${{ inputs.free_disk_space }}
           build_method=${{ inputs.build_method }}
           remove_protected_exports=${{ inputs.remove_protected_exports }}
-          baseline=stock (no KSU/SUSFS/tweaks)
+          root_flavor=${{ inputs.root_flavor }}
+          with_susfs=${{ inputs.with_susfs }}
+          root_commit=${ROOT_COMMIT:-}
+          susfs_commit=${SUSFS_COMMIT:-}
+          notes=$NOTES
           EOF
           cat dist/BuildInfo.txt
 
