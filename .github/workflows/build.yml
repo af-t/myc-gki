@@ -104,6 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           CONFIG="$GITHUB_WORKSPACE/.github/config/android16-6.12.json"
+          REMOTE="$(jq -r '.common_remote' "$CONFIG")"
           TAG="$(jq -r '.common_tag' "$CONFIG")"
           PINNED_SHA="$(jq -r '.common_sha // empty' "$CONFIG")"
           BR="common-android16-6.12-${{ matrix.date }}"
@@ -123,7 +124,7 @@ jobs:
             sleep 15
           done
           cd common
-          git fetch --depth=1 origin "refs/tags/$TAG:refs/tags/$TAG"
+          git fetch --depth=1 "$REMOTE" "refs/tags/$TAG:refs/tags/$TAG"
           if [ -n "$PINNED_SHA" ]; then
             git checkout "$PINNED_SHA"
           else
@@ -177,7 +178,7 @@ jobs:
           tail -n 1 "$SL"
 
       - name: Apply version-mismatch bypass
-        if: ${{ inputs.allow_version_mismatch == 'true' }}
+        if: inputs.allow_version_mismatch
         shell: bash
         working-directory: ${{ github.workspace }}/kernel/common
         run: |
