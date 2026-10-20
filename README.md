@@ -9,7 +9,7 @@ Pinned: `6.12.38` with SPL `2025-09`; CI syncs the kernel manifest, then pins `k
 
 1. Open **Actions** -> **Build kernel**.
 2. Select **Run workflow** -> choose `spl` (`2025-09` is the default).
-3. Leave `brand_name` empty to keep the stock GKI version string.
+3. Leave `brand_name` empty to keep the stock GKI version string. Set `spoof_sublevel` (e.g., `113`) to display `6.12.<N>-android16-5-<brand>` while the pinned source, `make kernelversion`, and KMI stay `6.12.38`/gen 5; this is cosmetic only.
 4. Defaults load vendor modules (`allow_version_mismatch`, `remove_protected_exports` on) and reuse cached source (`use_source_cache` on).
 5. Optional root: pick `root_flavor` (`ksu`, `ksunext`, `sukisu-ultra`, `resukisu`) and/or tick `with_susfs`. SUSFS needs a root flavor; the matching manager app is installed manually.
 6. Optional NoMount: tick `with_nomount` to build the VFS path redirection framework (`CONFIG_NOMOUNT=y`); it works with or without a root flavor, and the NoMount metamodule is installed manually.

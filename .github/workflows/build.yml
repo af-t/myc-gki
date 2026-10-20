@@ -28,6 +28,11 @@ on:
         type: string
         default: ""
         required: false
+      spoof_sublevel:
+        description: "Cosmetic sublevel override for the version string (e.g., 113); source and KMI stay pinned"
+        type: string
+        default: ""
+        required: false
       allow_version_mismatch:
         description: "Force-load modules with mismatched symbol versions (Wild-style bypass)"
         type: boolean
@@ -230,16 +235,19 @@ jobs:
       - name: Apply optional kernel branding
         shell: bash
         working-directory: ${{ github.workspace }}
+        env:
+          BRAND: ${{ inputs.brand_name }}
+          SPOOF_SUBLEVEL: ${{ inputs.spoof_sublevel }}
+          SOURCE_SUBLEVEL: ${{ matrix.sublevel }}
         run: |
           set -euo pipefail
-          BRAND="${{ inputs.brand_name }}"
           SL="kernel/common/scripts/setlocalversion"
           if ! grep -q 'scm_version}"' "$SL"; then
             echo "::error::Unexpected scripts/setlocalversion format" >&2
             exit 1
           fi
           sed -i '$d' "$SL"
-          if [ -z "$BRAND" ]; then
+          if [ -z "$BRAND" ] && [ -z "$SPOOF_SUBLEVEL" ]; then
             # Empty brand pins the stock version string.
             cat >> "$SL" <<'EOF'
           echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}$(scm_version | sed 's/-dirty$//')"
@@ -253,7 +261,13 @@ jobs:
               echo "::error::KMI_GENERATION not found; cannot apply KMI-preserving branding" >&2
               exit 1
             fi
-            echo "echo \"$KERNEL_PART.${{ matrix.sublevel }}-$ANDROID_PART-$KMI-$BRAND\"" >> "$SL"
+            VERSION="$(python3 scripts/spoof_sublevel.py \
+              --kernel-part "$KERNEL_PART" \
+              --sublevel "${SPOOF_SUBLEVEL:-$SOURCE_SUBLEVEL}" \
+              --android-part "$ANDROID_PART" \
+              --kmi "$KMI" \
+              --brand "$BRAND")"
+            printf 'echo %q\n' "$VERSION" >> "$SL"
           fi
           chmod +x "$SL"
           tail -n 1 "$SL"
@@ -387,6 +401,7 @@ jobs:
           common_msg=$MSG
           config_fragment=$FRAG_SHA
           brand_name=${{ inputs.brand_name }}
+          spoof_sublevel=${{ inputs.spoof_sublevel }}
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
           use_source_cache=${{ inputs.use_source_cache }}
           free_disk_space=${{ inputs.free_disk_space }}
