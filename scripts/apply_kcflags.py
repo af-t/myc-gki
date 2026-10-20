@@ -45,7 +45,7 @@ def apply_kcflags(build_file: Path, target: str, flags: list[str]) -> Path:
 
     indent = line[: len(line) - len(line.lstrip())]
     rendered = ", ".join(json.dumps(flag) for flag in flags)
-    lines[kcflags_idx] = f"{indent}kcflags = {expression} + [{rendered}],\n"
+    lines[kcflags_idx] = f"{indent}kcflags = {expression} + ({rendered},),\n"
     build_file.write_text("".join(lines))
     return build_file
 

@@ -30,7 +30,7 @@ class TestApplyKcflags(unittest.TestCase):
             content = build_file.read_text()
             self.assertIn(
                 'name = "kernel_aarch64",\n'
-                '    kcflags = COMMON_KCFLAGS + ["-O3"],\n',
+                '    kcflags = COMMON_KCFLAGS + ("-O3",),\n',
                 content,
             )
             self.assertIn(
@@ -45,7 +45,7 @@ class TestApplyKcflags(unittest.TestCase):
             build_file.write_text(
                 BUILD_CONTENT.replace(
                     'name = "kernel_aarch64",\n    kcflags = COMMON_KCFLAGS,',
-                    'name = "kernel_aarch64",\n    kcflags = COMMON_KCFLAGS + ["-DEXISTING"],',
+                    'name = "kernel_aarch64",\n    kcflags = COMMON_KCFLAGS + ("-DEXISTING",),',
                 )
             )
 
@@ -53,7 +53,7 @@ class TestApplyKcflags(unittest.TestCase):
 
             content = build_file.read_text()
             self.assertIn(
-                'kcflags = COMMON_KCFLAGS + ["-DEXISTING"] + ["-O3"],',
+                'kcflags = COMMON_KCFLAGS + ("-DEXISTING",) + ("-O3",),',
                 content,
             )
 
@@ -66,7 +66,7 @@ class TestApplyKcflags(unittest.TestCase):
             apply_kcflags(build_file, "kernel_aarch64", ["-O3"])
 
             content = build_file.read_text()
-            self.assertEqual(content.count('COMMON_KCFLAGS + ["-O3"]'), 1)
+            self.assertEqual(content.count('COMMON_KCFLAGS + ("-O3",)'), 1)
 
     def test_missing_target_raises(self):
         with tempfile.TemporaryDirectory() as tmpdir:

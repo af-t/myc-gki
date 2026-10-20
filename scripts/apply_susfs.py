@@ -6,6 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+SUSFS_BRANCH = "gki-android16-6.12"
+SUSFS_REPO = "https://gitlab.com/simonpunk/susfs4ksu.git"
+SUSFS_COMMIT = "acb92d4abc922cac384a207744b2db40281a7c7f"
+
 SUSFS_OPTS = [
     "CONFIG_KSU_SUSFS=y",
     "CONFIG_KSU_SUSFS_SUS_PATH=y",
@@ -99,17 +103,21 @@ def apply_susfs(
     root_flavor: str,
     susfs_dir: Path | None = None,
 ) -> str:
-    branch = "gki-android16-6.12"
-    repo = "https://gitlab.com/simonpunk/susfs4ksu.git"
-
     if susfs_dir is None:
         susfs_dir = workspace_root / "susfs4ksu"
         if not susfs_dir.exists():
-            subprocess.run(["git", "clone", "--depth=1", "-b", branch, repo, str(susfs_dir)], check=True)
+            subprocess.run(
+                ["git", "clone", "--no-checkout", "-b", SUSFS_BRANCH, SUSFS_REPO, str(susfs_dir)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(susfs_dir), "checkout", "--detach", SUSFS_COMMIT],
+                check=True,
+            )
 
     res = subprocess.run(["git", "-C", str(susfs_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
     sha = res.stdout.strip()
-    print(f"susfs_branch={branch} susfs_commit={sha}")
+    print(f"susfs_branch={SUSFS_BRANCH} susfs_commit={sha}")
 
     github_env = os.environ.get("GITHUB_ENV")
     if github_env and Path(github_env).is_file():
