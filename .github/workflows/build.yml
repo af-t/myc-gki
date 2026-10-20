@@ -61,6 +61,10 @@ on:
         description: "Apply SUSFS root-hiding patches (requires a root flavor)"
         type: boolean
         default: false
+      with_nomount:
+        description: "Apply NoMount VFS path redirection framework"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -257,20 +261,9 @@ jobs:
       - name: Apply version-mismatch bypass
         if: inputs.allow_version_mismatch
         shell: bash
-        working-directory: ${{ github.workspace }}/kernel/common
         run: |
           set -euo pipefail
-          TARGET="kernel/module/version.c"
-          if [ ! -f "$TARGET" ]; then
-            TARGET="kernel/module.c"
-          fi
-          sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET"
-          if ! grep -A 5 'bad_version:' "$TARGET" | grep -q 'return 1;'; then
-            echo "::error::Bypass patch failed; 'return 1;' not found at bad_version" >&2
-            grep -A 10 'bad_version:' "$TARGET" || true
-            exit 1
-          fi
-          echo "Version-mismatch bypass applied to $TARGET"
+          python3 scripts/patch_version_bypass.py --kernel-dir kernel/common
 
       - name: Restore bazel cache
         if: inputs.use_cache
@@ -299,219 +292,35 @@ jobs:
       - name: Remove protected exports (Wild-style)
         if: inputs.remove_protected_exports
         shell: bash
-        working-directory: ${{ github.workspace }}/kernel
         run: |
           set -euo pipefail
-          rm -rf common/android/abi_gki_protected_exports_*
-          if ls -1 common/android/abi_gki_protected_exports_* >/dev/null 2>&1; then
-            echo "::error::abi_gki_protected_exports_* still present after removal" >&2
-            ls -la common/android/abi_gki_protected_exports_* || true
-            exit 1
-          fi
-          if grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports_aarch64"' common/BUILD.bazel; then
-            BEFORE="$(sha256sum common/BUILD.bazel | awk '{print $1}')"
-            perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' common/BUILD.bazel
-            AFTER="$(sha256sum common/BUILD.bazel | awk '{print $1}')"
-            [ "$BEFORE" != "$AFTER" ] || { echo "::error::common/BUILD.bazel was not modified" >&2; exit 1; }
-            grep -q '"protected_exports_list"[[:space:]]*:[[:space:]]*"android/abi_gki_protected_exports_aarch64"' common/BUILD.bazel && { echo "::error::protected_exports_list still referenced" >&2; exit 1; }
-          fi
-          if grep -q '^protected_modules = ' common/modules.bzl; then
-            BEFORE="$(sha256sum common/modules.bzl | awk '{print $1}')"
-            sed -i 's/protected_modules = \[.*\]/protected_modules = []/' common/modules.bzl
-            AFTER="$(sha256sum common/modules.bzl | awk '{print $1}')"
-            [ "$BEFORE" != "$AFTER" ] || { echo "::error::common/modules.bzl was not modified" >&2; exit 1; }
-            grep -q '^protected_modules = \[\]' common/modules.bzl || { echo "::error::protected_modules was not reset" >&2; exit 1; }
-          fi
-          if grep -q 'protected_module_names_list' common/BUILD.bazel; then
-            perl -pi -e 's/^\s*protected_module_names_list\s*=\s*":gki_(?:aarch64|x86_64)_protected_module_names",\s*$//;' common/BUILD.bazel
-            grep -q 'protected_module_names_list' common/BUILD.bazel && { echo "::error::protected_module_names_list still referenced" >&2; exit 1; }
-          fi
-          echo "Protected exports removed"
+          python3 scripts/remove_protected_exports.py --kernel-dir kernel
 
       - name: Setup root implementation
         shell: bash
-        working-directory: ${{ github.workspace }}/kernel
-        env:
-          ROOT_FLAVOR: ${{ inputs.root_flavor }}
-          WITH_SUSFS: ${{ inputs.with_susfs }}
         run: |
           set -euo pipefail
-          if [ "$ROOT_FLAVOR" = "baseline" ]; then
-            if [ "$WITH_SUSFS" = "true" ]; then
-              echo "::error::with_susfs requires a root flavor; baseline carries no KSU source to attach SUSFS to" >&2
-              exit 1
-            fi
-            echo "baseline selected; skipping root integration"
-            exit 0
-          fi
-          case "$ROOT_FLAVOR" in
-            ksu)
-              REPO="https://github.com/tiann/KernelSU.git"
-              BRANCH="main"
-              DIR="KernelSU"
-              ;;
-            ksunext)
-              DIR="KernelSU-Next"
-              if [ "$WITH_SUSFS" = "true" ]; then
-                REPO="https://github.com/pershoot/KernelSU-Next.git"
-                BRANCH="dev-susfs"
-              else
-                REPO="https://github.com/KernelSU-Next/KernelSU-Next.git"
-                BRANCH="dev"
-              fi
-              ;;
-            sukisu-ultra)
-              REPO="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"
-              DIR="SukiSU-Ultra"
-              if [ "$WITH_SUSFS" = "true" ]; then
-                BRANCH="builtin"
-              else
-                BRANCH="main"
-              fi
-              ;;
-            resukisu)
-              REPO="https://github.com/ReSukiSU/ReSukiSU.git"
-              BRANCH="main"
-              DIR="ReSukiSU"
-              ;;
-            *)
-              echo "::error::unknown root_flavor: $ROOT_FLAVOR" >&2
-              exit 1
-              ;;
-          esac
-          for CAND in KernelSU KernelSU-Next ReSukiSU SukiSU-Ultra; do
-            if [ "$CAND" != "$DIR" ] && [ -e "$CAND" ]; then
-              echo "::error::refusing mixed root implementations: found $CAND" >&2
-              exit 1
-            fi
-          done
-          if [ -e common/drivers/kernelsu ] || [ -L common/drivers/kernelsu ]; then
-            echo "::error::refusing to replace an existing kernelsu integration" >&2
-            exit 1
-          fi
-          SHA="$(git ls-remote "$REPO" "refs/heads/$BRANCH" | awk '{print $1; exit}')"
-          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::failed to resolve $REPO@$BRANCH (got: ${SHA:-empty})" >&2
-            exit 1
-          fi
-          git clone --no-checkout "$REPO" "$DIR"
-          git -C "$DIR" fetch --depth=1 origin "$SHA"
-          git -C "$DIR" checkout --detach "$SHA"
-          [ "$(git -C "$DIR" rev-parse HEAD)" = "$SHA" ] || { echo "::error::root commit mismatch" >&2; exit 1; }
-          [ -f "$DIR/kernel/Kconfig" ] && [ -f "$DIR/kernel/Makefile" ] || { echo "::error::$DIR@$BRANCH@$SHA has no kernel integration" >&2; exit 1; }
-          REL="$(realpath --relative-to=common/drivers "$PWD/$DIR/kernel")"
-          ln -s "$REL" common/drivers/kernelsu
-          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' common/drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> common/drivers/Makefile
-          [ "$(grep -c '^endmenu' common/drivers/Kconfig)" = "1" ] || { echo "::error::unexpected endmenu count in common/drivers/Kconfig" >&2; exit 1; }
-          grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
-          grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || { echo "::error::Kconfig wiring failed" >&2; exit 1; }
-          DEF="common/arch/arm64/configs/gki_defconfig"
-          grep -q '^CONFIG_KSU=y$' "$DEF" || echo 'CONFIG_KSU=y' >> "$DEF"
-          if [ "$ROOT_FLAVOR" = "ksunext" ]; then
-            if grep -q 'KernelSU requires either CONFIG_KPROBES' common/drivers/kernelsu/Kbuild 2>/dev/null; then
-              sed -i 's/$(error "KernelSU requires either CONFIG_KPROBES=y or CONFIG_KSU_SUSFS=y")/$(warning "KernelSU requires either CONFIG_KPROBES=y or CONFIG_KSU_SUSFS=y")/' common/drivers/kernelsu/Kbuild
-            fi
-          fi
-          if [ "$ROOT_FLAVOR" = "resukisu" ]; then
-            grep -q '^CONFIG_KSU_MULTI_MANAGER_SUPPORT=n$' "$DEF" || echo 'CONFIG_KSU_MULTI_MANAGER_SUPPORT=n' >> "$DEF"
-            grep -q '^CONFIG_KSU_TOOLKIT_SUPPORT=y$' "$DEF" || echo 'CONFIG_KSU_TOOLKIT_SUPPORT=y' >> "$DEF"
-            if grep -q 'as a git submodule instead of copying code directly' "$DIR/kernel/Kbuild" 2>/dev/null; then
-              sed -i 's/$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)/$(warning You should use $(REPO_NAME) as a git submodule instead of copying code directly)/' "$DIR/kernel/Kbuild"
-            fi
-          fi
-          echo "root_flavor=$ROOT_FLAVOR root_repo=$REPO root_branch=$BRANCH root_commit=$SHA"
-          echo "ROOT_COMMIT=$SHA" >> "$GITHUB_ENV"
+          python3 scripts/setup_root.py --kernel-dir kernel --flavor "${{ inputs.root_flavor }}" ${{ inputs.with_susfs && '--with-susfs' || '' }}
 
       - name: Apply SUSFS patches
         if: inputs.with_susfs
         shell: bash
-        working-directory: ${{ github.workspace }}
-        env:
-          ROOT_FLAVOR: ${{ inputs.root_flavor }}
         run: |
           set -euo pipefail
-          BRANCH="gki-android16-6.12"
-          git clone --depth=1 -b "$BRANCH" https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-          SHA="$(git -C susfs4ksu rev-parse HEAD)"
-          echo "susfs_branch=$BRANCH susfs_commit=$SHA"
-          echo "SUSFS_COMMIT=$SHA" >> "$GITHUB_ENV"
-          if [ "$ROOT_FLAVOR" = "ksu" ]; then
-            PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-            [ -f "$PATCH" ] || { echo "::error::missing $PATCH" >&2; exit 1; }
-            patch --forward -p1 -d kernel/KernelSU < "$PATCH"
-          fi
-          DEF="kernel/common/arch/arm64/configs/gki_defconfig"
-          while IFS= read -r LINE; do
-            [ -n "$LINE" ] || continue
-            KEY="${LINE%%=*}"
-            if grep -q "^$KEY=" "$DEF"; then
-              sed -i "s|^$KEY=.*|$LINE|" "$DEF"
-            else
-              echo "$LINE" >> "$DEF"
-            fi
-          done <<'OPTS'
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          OPTS
-          cp -a susfs4ksu/kernel_patches/fs/. kernel/common/fs/
-          cp -a susfs4ksu/kernel_patches/include/linux/. kernel/common/include/linux/
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-6.12.patch kernel/common/
-          patch --forward -p1 -d kernel/common < kernel/common/50_add_susfs_in_gki-android16-6.12.patch
-          if grep -q 'VMA_PAD_START(' kernel/common/fs/proc/task_mmu.c && ! grep -qE '#include <linux/pgsize_migration(_inline)?\.h>|define VMA_PAD_START' kernel/common/fs/proc/task_mmu.c; then
-            sed -i '1a #ifndef VMA_PAD_START\n#define VMA_PAD_START(vma) ((vma)->vm_end)\n#endif' kernel/common/fs/proc/task_mmu.c
-          fi
-          FOUND="$(find kernel/common -name selinux_hide.c 2>/dev/null || true)"
-          [ -n "$FOUND" ] || echo "::warning::selinux_hide.c not found under kernel/common; skipping pointer fix"
-          for F in $FOUND; do
-            if grep -q "extern void security_dump_masked_av_fn" "$F"; then
-              sed -i 's/if (security_dump_masked_av_fn)/if (\&security_dump_masked_av_fn)/g' "$F"
-              sed -i 's/if (security_dump_masked_av_fn != NULL)/if (\&security_dump_masked_av_fn != NULL)/g' "$F"
-              sed -i 's/if (context_struct_compute_av_fn)/if (\&context_struct_compute_av_fn)/g' "$F"
-              sed -i 's/if (context_struct_compute_av_fn != NULL)/if (\&context_struct_compute_av_fn != NULL)/g' "$F"
-              echo "patched $F (function form)"
-            elif grep -q "if (security_dump_masked_av_fn" "$F"; then
-              sed -i 's/if (security_dump_masked_av_fn)/if (security_dump_masked_av_fn != NULL)/g' "$F"
-              sed -i 's/if (context_struct_compute_av_fn)/if (context_struct_compute_av_fn != NULL)/g' "$F"
-              echo "patched $F (pointer form)"
-            else
-              echo "$F already patched"
-            fi
-          done
-          echo "SUSFS applied"
+          python3 scripts/apply_susfs.py --workspace . --flavor "${{ inputs.root_flavor }}"
+
+      - name: Apply NoMount
+        if: inputs.with_nomount
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/setup_nomount.py --kernel-dir kernel
 
       - name: Apply config fragment
         shell: bash
-        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          FRAG="configs/baseline.fragment"
-          DEF="kernel/common/arch/arm64/configs/gki_defconfig"
-          [ -f "$DEF" ] || { echo "::error::$DEF not found" >&2; exit 1; }
-          BAD="$(grep -vE '^\s*(#|$)' "$FRAG" | grep -vE '^CONFIG_[A-Za-z0-9_]+=.+' || true)"
-          [ -z "$BAD" ] || { echo "::error::malformed fragment lines:" >&2; echo "$BAD" >&2; exit 1; }
-          OPTS="$(grep -vE '^\s*(#|$)' "$FRAG" || true)"
-          if [ -n "$OPTS" ]; then
-            while IFS= read -r LINE; do
-              KEY="${LINE%%=*}"
-              if grep -q "^$KEY=" "$DEF"; then
-                sed -i "s|^$KEY=.*|$LINE|" "$DEF"
-              else
-                echo "$LINE" >> "$DEF"
-              fi
-            done <<< "$OPTS"
-            echo "fragment applied:"
-            echo "$OPTS"
-          else
-            echo "fragment empty; nothing to apply"
-          fi
+          python3 scripts/apply_fragment.py --fragment configs/baseline.fragment --defconfig kernel/common/arch/arm64/configs/gki_defconfig
 
       - name: Build kernel Image
         shell: bash
@@ -537,6 +346,7 @@ jobs:
         env:
           ROOT_FLAVOR: ${{ inputs.root_flavor }}
           WITH_SUSFS: ${{ inputs.with_susfs }}
+          WITH_NOMOUNT: ${{ inputs.with_nomount }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -561,6 +371,13 @@ jobs:
             NOTES="$ROOT_FLAVOR"
             [ "$WITH_SUSFS" = "true" ] && NOTES="$NOTES+susfs"
           fi
+          if [ "$WITH_NOMOUNT" = "true" ]; then
+            if [ "$ROOT_FLAVOR" = "baseline" ]; then
+              NOTES="nomount"
+            else
+              NOTES="$NOTES+nomount"
+            fi
+          fi
           cat > dist/BuildInfo.txt <<EOF
           version=6.12.38-android16-${{ matrix.date }}
           common_remote=$REMOTE
@@ -577,8 +394,10 @@ jobs:
           remove_protected_exports=${{ inputs.remove_protected_exports }}
           root_flavor=${{ inputs.root_flavor }}
           with_susfs=${{ inputs.with_susfs }}
+          with_nomount=${{ inputs.with_nomount }}
           root_commit=${ROOT_COMMIT:-}
           susfs_commit=${SUSFS_COMMIT:-}
+          nomount_commit=${NOMOUNT_COMMIT:-}
           notes=$NOTES
           EOF
           cat dist/BuildInfo.txt
