@@ -36,6 +36,21 @@ class TestPatchVersionBypass(unittest.TestCase):
             content = target.read_text()
             self.assertIn("return 1;", content)
 
+    def test_patch_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            target = base / "kernel" / "module" / "version.c"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                "bad_version:\n"
+                "\tpr_warn(\"bad version\");\n"
+                "\treturn 1;\n"
+            )
+
+            patch_version_bypass(base)
+
+            self.assertIn("return 1;", target.read_text())
+
     def test_missing_target_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

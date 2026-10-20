@@ -52,6 +52,30 @@ class TestSetupRoot(unittest.TestCase):
             self.assertIn('source "drivers/kernelsu/Kconfig"', (drivers / "Kconfig").read_text())
             self.assertIn("CONFIG_KSU=y", (arch_configs / "gki_defconfig").read_text())
 
+    def test_apply_flavor_quirks_resukisu_overrides_conflicts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            arch_configs = base / "common" / "arch" / "arm64" / "configs"
+            arch_configs.mkdir(parents=True)
+            defconfig = arch_configs / "gki_defconfig"
+            defconfig.write_text(
+                "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y\n"
+                "CONFIG_KSU_TOOLKIT_SUPPORT=n\n"
+            )
+
+            dummy_src = base / "ReSukiSU" / "kernel"
+            dummy_src.mkdir(parents=True)
+            (dummy_src / "Kbuild").write_text("# dummy")
+
+            apply_flavor_quirks("resukisu", base, dummy_src)
+            apply_flavor_quirks("resukisu", base, dummy_src)
+
+            content = defconfig.read_text()
+            self.assertIn("CONFIG_KSU_MULTI_MANAGER_SUPPORT=n", content)
+            self.assertIn("CONFIG_KSU_TOOLKIT_SUPPORT=y", content)
+            self.assertNotIn("CONFIG_KSU_MULTI_MANAGER_SUPPORT=y", content)
+            self.assertNotIn("CONFIG_KSU_TOOLKIT_SUPPORT=n", content)
+
     def test_apply_flavor_quirks_ksunext(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

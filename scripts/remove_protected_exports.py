@@ -36,6 +36,10 @@ def remove_protected_exports(kernel_dir: Path) -> None:
             content,
             flags=re.MULTILINE,
         )
+        if "protected_exports_list" in content:
+            raise RuntimeError(f"Failed to remove protected_exports_list from {build_bazel}")
+        if "protected_module_names_list" in content:
+            raise RuntimeError(f"Failed to remove protected_module_names_list from {build_bazel}")
         build_bazel.write_text(content)
 
     modules_bzl = common_dir / "modules.bzl"

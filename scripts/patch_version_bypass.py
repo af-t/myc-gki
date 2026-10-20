@@ -13,6 +13,7 @@ def patch_version_bypass(kernel_dir: Path) -> Path:
     lines = target.read_text().splitlines(keepends=True)
     found_bad_version = False
     patched = False
+    already_patched = False
 
     for i, line in enumerate(lines):
         if "bad_version:" in line:
@@ -22,11 +23,16 @@ def patch_version_bypass(kernel_dir: Path) -> Path:
                     lines[j] = lines[j].replace("return 0;", "return 1;")
                     patched = True
                     break
+                if "return 1;" in lines[j]:
+                    already_patched = True
+                    break
             break
 
     if not found_bad_version:
         raise ValueError(f"'bad_version:' label not found in {target}")
     if not patched:
+        if already_patched:
+            return target
         raise ValueError(f"Could not patch 'return 0;' after 'bad_version:' in {target}")
 
     target.write_text("".join(lines))

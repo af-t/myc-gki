@@ -33,6 +33,19 @@ on:
         type: string
         default: ""
         required: false
+      experimental_o3:
+        description: "Add -O3 to KCFLAGS (experimental; may affect stability)"
+        type: boolean
+        default: false
+      lto:
+        description: "LTO mode (default keeps gki_defconfig; none/thin/full are experiments)"
+        type: choice
+        options:
+          - default
+          - none
+          - thin
+          - full
+        default: default
       allow_version_mismatch:
         description: "Force-load modules with mismatched symbol versions (Wild-style bypass)"
         type: boolean
@@ -350,7 +363,17 @@ jobs:
           echo "build_method=$METHOD (kleaf)"
           sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
           sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+          if [ "${{ inputs.experimental_o3 }}" = "true" ]; then
+            python3 "$GITHUB_WORKSPACE/scripts/apply_kcflags.py" \
+              --build-file common/BUILD.bazel \
+              --flag=-O3
+          fi
+          LTO_ARGS=()
+          if [ "${{ inputs.lto }}" != "default" ]; then
+            LTO_ARGS+=("--lto=${{ inputs.lto }}")
+          fi
           tools/bazel build --config=fast \
+            "${LTO_ARGS[@]}" \
             --disk_cache=/home/runner/.cache/bazel \
             //common:kernel_aarch64/Image
 
@@ -361,8 +384,16 @@ jobs:
           ROOT_FLAVOR: ${{ inputs.root_flavor }}
           WITH_SUSFS: ${{ inputs.with_susfs }}
           WITH_NOMOUNT: ${{ inputs.with_nomount }}
+          BRAND_NAME: ${{ inputs.brand_name }}
+          SPOOF_SUBLEVEL: ${{ inputs.spoof_sublevel }}
         run: |
           set -euo pipefail
+          for value in "$BRAND_NAME" "$SPOOF_SUBLEVEL"; do
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "::error::brand_name and spoof_sublevel must be single-line" >&2
+              exit 1
+            fi
+          done
           mkdir -p dist
           if [ -f "kernel/bazel-bin/common/kernel_aarch64/Image" ]; then
             cp kernel/bazel-bin/common/kernel_aarch64/Image dist/Image
@@ -400,8 +431,10 @@ jobs:
           common_date=$DATE
           common_msg=$MSG
           config_fragment=$FRAG_SHA
-          brand_name=${{ inputs.brand_name }}
-          spoof_sublevel=${{ inputs.spoof_sublevel }}
+          brand_name=$BRAND_NAME
+          spoof_sublevel=$SPOOF_SUBLEVEL
+          experimental_o3=${{ inputs.experimental_o3 }}
+          lto=${{ inputs.lto }}
           allow_version_mismatch=${{ inputs.allow_version_mismatch }}
           use_source_cache=${{ inputs.use_source_cache }}
           free_disk_space=${{ inputs.free_disk_space }}

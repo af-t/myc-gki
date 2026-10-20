@@ -76,13 +76,17 @@ def apply_flavor_quirks(root_flavor: str, kernel_dir: Path, source_dir: Path) ->
     if root_flavor == "resukisu":
         if defconfig.is_file():
             def_content = defconfig.read_text()
-            extras = []
-            if "CONFIG_KSU_MULTI_MANAGER_SUPPORT=" not in def_content:
-                extras.append("CONFIG_KSU_MULTI_MANAGER_SUPPORT=n")
-            if "CONFIG_KSU_TOOLKIT_SUPPORT=" not in def_content:
-                extras.append("CONFIG_KSU_TOOLKIT_SUPPORT=y")
-            if extras:
-                defconfig.write_text(def_content.rstrip() + "\n" + "\n".join(extras) + "\n")
+            for key, value in (
+                ("CONFIG_KSU_MULTI_MANAGER_SUPPORT", "n"),
+                ("CONFIG_KSU_TOOLKIT_SUPPORT", "y"),
+            ):
+                pattern = rf"^{re.escape(key)}=.*(?:\n|$)"
+                replacement = f"{key}={value}\n"
+                if re.search(pattern, def_content, flags=re.MULTILINE):
+                    def_content = re.sub(pattern, replacement, def_content, flags=re.MULTILINE)
+                else:
+                    def_content = def_content.rstrip() + f"\n{replacement}"
+            defconfig.write_text(def_content)
 
         kbuild = source_dir / "Kbuild"
         if kbuild.is_file():

@@ -43,6 +43,21 @@ class TestRemoveProtectedExports(unittest.TestCase):
             self.assertIn("protected_modules = []", bzl_content)
             self.assertNotIn("foo.ko", bzl_content)
 
+    def test_raises_if_protected_module_names_list_remains(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kernel_dir = Path(tmpdir)
+            common = kernel_dir / "common"
+            common.mkdir(parents=True)
+            (common / "BUILD.bazel").write_text(
+                "kernel_build(\n"
+                '    name = "kernel_aarch64",\n'
+                '    protected_module_names_list = "unexpected",\n'
+                ")\n"
+            )
+
+            with self.assertRaises(RuntimeError):
+                remove_protected_exports(kernel_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

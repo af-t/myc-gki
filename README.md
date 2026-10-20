@@ -13,7 +13,8 @@ Pinned: `6.12.38` with SPL `2025-09`; CI syncs the kernel manifest, then pins `k
 4. Defaults load vendor modules (`allow_version_mismatch`, `remove_protected_exports` on) and reuse cached source (`use_source_cache` on).
 5. Optional root: pick `root_flavor` (`ksu`, `ksunext`, `sukisu-ultra`, `resukisu`) and/or tick `with_susfs`. SUSFS needs a root flavor; the matching manager app is installed manually.
 6. Optional NoMount: tick `with_nomount` to build the VFS path redirection framework (`CONFIG_NOMOUNT=y`); it works with or without a root flavor, and the NoMount metamodule is installed manually.
-7. Download the result from **Artifacts**: `Image-6.12.38-android16-<spl>` and `BuildInfo` (records the exact inputs and commits used).
+7. Optional experimental build: tick `experimental_o3` to add `-O3` to `KCFLAGS`, and choose `lto` (`default`, `none`, `thin`, `full`). `default` keeps the pinned config (currently no LTO); `-O3` patches the `kernel_aarch64` `kcflags`, and a non-default LTO mode is passed explicitly to `tools/bazel build`. These change code generation and are not stable defaults.
+8. Download the result from **Artifacts**: `Image-6.12.38-android16-<spl>` and `BuildInfo` (records the exact inputs and commits used).
 
 ## Repository contents
 
