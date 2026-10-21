@@ -154,7 +154,7 @@ def apply_susfs(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Apply SUSFS patches and configuration.")
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="Workspace root (default: current dir)")
-    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (ksu, ksunext, sukisu-ultra, resukisu)")
+    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (ksu, ksunext, sukisu-ultra, bakasu)")
     parser.add_argument("--susfs-dir", type=Path, default=None, help="Existing susfs4ksu repo directory")
     args = parser.parse_args()
 

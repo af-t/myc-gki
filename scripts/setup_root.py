@@ -21,8 +21,8 @@ def get_root_spec(root_flavor: str, with_susfs: bool) -> tuple[str, str, str]:
     if root_flavor == "sukisu-ultra":
         branch = "builtin" if with_susfs else "main"
         return "https://github.com/SukiSU-Ultra/SukiSU-Ultra.git", branch, "SukiSU-Ultra"
-    if root_flavor == "resukisu":
-        return "https://github.com/ReSukiSU/ReSukiSU.git", "main", "ReSukiSU"
+    if root_flavor in ("bakasu", "resukisu"):
+        return "https://github.com/Baka-SU/BakaSU.git", "main", "BakaSU"
 
     raise ValueError(f"Unknown root_flavor: {root_flavor}")
 
@@ -73,7 +73,7 @@ def apply_flavor_quirks(root_flavor: str, kernel_dir: Path, source_dir: Path) ->
             if target in content:
                 kbuild.write_text(content.replace(target, replacement))
 
-    if root_flavor == "resukisu":
+    if root_flavor in ("bakasu", "resukisu"):
         if defconfig.is_file():
             def_content = defconfig.read_text()
             for key, value in (
@@ -149,7 +149,7 @@ def setup_root(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Integrate root implementation (KernelSU variants).")
     parser.add_argument("--kernel-dir", type=Path, default=Path("kernel"), help="Path to kernel root (default: kernel)")
-    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (baseline, ksu, ksunext, sukisu-ultra, resukisu)")
+    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (baseline, ksu, ksunext, sukisu-ultra, bakasu)")
     parser.add_argument("--with-susfs", action="store_true", help="Enable SUSFS compatibility")
     parser.add_argument("--commit", type=str, default=None, help="Explicit commit SHA")
     args = parser.parse_args()

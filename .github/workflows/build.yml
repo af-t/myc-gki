@@ -73,7 +73,7 @@ on:
           - ksu
           - ksunext
           - sukisu-ultra
-          - resukisu
+          - bakasu
         default: baseline
       with_susfs:
         description: "Apply SUSFS root-hiding patches (requires a root flavor)"
@@ -81,6 +81,10 @@ on:
         default: false
       with_nomount:
         description: "Apply NoMount VFS path redirection framework"
+        type: boolean
+        default: false
+      with_bore:
+        description: "Integrate BORE CPU Scheduler (Burst-Oriented Response Enhancer)"
         type: boolean
         default: false
 
@@ -343,6 +347,13 @@ jobs:
           set -euo pipefail
           python3 scripts/setup_nomount.py --kernel-dir kernel
 
+      - name: Apply BORE scheduler
+        if: inputs.with_bore
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_bore.py --kernel-dir kernel
+
       - name: Apply config fragment
         shell: bash
         run: |
@@ -384,6 +395,7 @@ jobs:
           ROOT_FLAVOR: ${{ inputs.root_flavor }}
           WITH_SUSFS: ${{ inputs.with_susfs }}
           WITH_NOMOUNT: ${{ inputs.with_nomount }}
+          WITH_BORE: ${{ inputs.with_bore }}
           BRAND_NAME: ${{ inputs.brand_name }}
           SPOOF_SUBLEVEL: ${{ inputs.spoof_sublevel }}
         run: |
@@ -423,6 +435,13 @@ jobs:
               NOTES="$NOTES+nomount"
             fi
           fi
+          if [ "$WITH_BORE" = "true" ]; then
+            if [ "$NOTES" = "stock (no root, no tweaks)" ]; then
+              NOTES="bore"
+            else
+              NOTES="$NOTES+bore"
+            fi
+          fi
           cat > dist/BuildInfo.txt <<EOF
           version=6.12.38-android16-${{ matrix.date }}
           common_remote=$REMOTE
@@ -443,9 +462,11 @@ jobs:
           root_flavor=${{ inputs.root_flavor }}
           with_susfs=${{ inputs.with_susfs }}
           with_nomount=${{ inputs.with_nomount }}
+          with_bore=${{ inputs.with_bore }}
           root_commit=${ROOT_COMMIT:-}
           susfs_commit=${SUSFS_COMMIT:-}
           nomount_commit=${NOMOUNT_COMMIT:-}
+          bore_version=${BORE_VERSION:-}
           notes=$NOTES
           EOF
           cat dist/BuildInfo.txt

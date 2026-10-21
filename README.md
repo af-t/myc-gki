@@ -1,27 +1,30 @@
-# myc-gki - Personal GKI 6.12.38 (android16)
+# myc-gki - My Custom GKI
 
-A personal kernel project built **only in CI** through a manual workflow trigger.
-Pinned: `6.12.38` with SPL `2025-09`; CI syncs the kernel manifest, then pins `kernel/common` to tag `android16-6.12-2025-09_r39` at the verified SHA.
+Automated CI build workflows and modular integration scripts for personal Android Generic Kernel Image (GKI) 6.12 (android16) builds.
 
-> CI cannot use a local kernel tree directly. It syncs (or reuses a cached) kernel tree, verifies the pinned SHA, then applies the selected patches. Local-only changes must be added to this repository as config before CI can reproduce them.
+## Credits
 
-## Build (CI only; no local build)
+This project integrates, adapts, and ports patches and techniques from the following authors and open-source repositories:
 
-1. Open **Actions** -> **Build kernel**.
-2. Select **Run workflow** -> choose `spl` (`2025-09` is the default).
-3. Leave `brand_name` empty to keep the stock GKI version string. Set `spoof_sublevel` (e.g., `113`) to display `6.12.<N>-android16-5-<brand>` while the pinned source, `make kernelversion`, and KMI stay `6.12.38`/gen 5; this is cosmetic only.
-4. Defaults load vendor modules (`allow_version_mismatch`, `remove_protected_exports` on) and reuse cached source (`use_source_cache` on).
-5. Optional root: pick `root_flavor` (`ksu`, `ksunext`, `sukisu-ultra`, `resukisu`) and/or tick `with_susfs`. SUSFS needs a root flavor; the matching manager app is installed manually.
-6. Optional NoMount: tick `with_nomount` to build the VFS path redirection framework (`CONFIG_NOMOUNT=y`); it works with or without a root flavor, and the NoMount metamodule is installed manually.
-7. Optional experimental build: tick `experimental_o3` to add `-O3` to `KCFLAGS`, and choose `lto` (`default`, `none`, `thin`, `full`). `default` keeps the pinned config (currently no LTO); `-O3` patches the `kernel_aarch64` `kcflags`, and a non-default LTO mode is passed explicitly to `tools/bazel build`. These change code generation and are not stable defaults.
-8. Download the result from **Artifacts**: `Image-6.12.38-android16-<spl>` and `BuildInfo` (records the exact inputs and commits used).
+- **Android Common Kernel (ACK)** - [Google / AOSP](https://android.googlesource.com/kernel/common)
+  Base Android Generic Kernel Image (GKI) tree and Kleaf build infrastructure.
+- **BORE (Burst-Oriented Response Enhancer) CPU Scheduler** - [Masahito Suzuki (@firelzrd)](https://github.com/firelzrd/bore-scheduler)
+  Burst-oriented interactive CPU scheduler algorithmic extension adapted for KMI preservation.
+- **NoMount** - [maxsteeel (@maxsteeel)](https://github.com/maxsteeel/nomount)
+  In-kernel VFS path redirection framework.
+- **SUSFS (KernelSU root hiding)** - [simonpunk (@simonpunk)](https://gitlab.com/simonpunk/susfs4ksu)
+  Kernel-level isolation and root evasion patches.
+- **KernelSU** - [tiann (@tiann)](https://github.com/tiann/KernelSU)
+  Kernel-based root solution for Android GKI devices.
+- **KernelSU-Next** - [rifsxd (@rifsxd)](https://github.com/rifsxd/KernelSU-Next)
+  Active KernelSU continuation with extended patch support.
+- **SukiSU-Ultra** - [The-SukiSU-Ultra-Project](https://github.com/The-SukiSU-Ultra-Project/SukiSU-Ultra)
+  KernelSU-based root flavor for GKI kernels.
+- **BakaSU** - [Baka-SU](https://github.com/Baka-SU/BakaSU)
+  KernelSU-based root solution for Android GKI (formerly ReSukiSU).
+- **Wild-style / Kernel Bypass Techniques**
+  Implementation techniques for module symbol CRC mismatch bypass and removing protected symbol restrictions.
 
-## Repository contents
+## DWYOR
 
-- `.github/workflows/build.yml` - the only workflow; triggered manually.
-- `.github/config/android16-6.12.json` - pinned common remote/tag/SHA, sublevel, and dates; source of truth for the matrix.
-- `configs/baseline.fragment` - personal defconfig tweaks merged into `gki_defconfig` at build time (currently namespaces + tmpfs xattr/ACL).
-- `scripts/` - Python patch and integration modules invoked by the workflow (version bypass, protected exports, fragment merge, root, SUSFS, NoMount).
-- Default build = stock AOSP plus: glibc `resolve_btfids` compiler fix, version-mismatch bypass, protected-exports removal, and the fragment above. No root unless `root_flavor` is set.
-- Optional branding preserves the KMI generation when supplied; an empty brand keeps the stock version.
-- Optional version-mismatch bypass uses the Wild-style `bad_version` patch. It can allow a mismatched external module to load, but it does not add a missing driver, firmware, or device binding.
+This repository and its resulting kernel builds are personal experimental projects provided as-is. Flashing custom kernels involves inherent risks including bootloops, data loss, or bricked devices. Always keep a verified backup of your stock boot images (`boot`, `init_boot`, `vbmeta`) and ensure your bootloader recovery paths are accessible before flashing. Do with your own risk.

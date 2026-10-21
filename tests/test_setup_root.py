@@ -22,6 +22,14 @@ class TestSetupRoot(unittest.TestCase):
         repo, branch, dir_name = get_root_spec("sukisu-ultra", True)
         self.assertEqual(branch, "builtin")
 
+        repo, branch, dir_name = get_root_spec("bakasu", False)
+        self.assertEqual(dir_name, "BakaSU")
+        self.assertEqual(branch, "main")
+        self.assertIn("Baka-SU/BakaSU", repo)
+
+        repo, branch, dir_name = get_root_spec("resukisu", False)
+        self.assertEqual(dir_name, "BakaSU")
+
         with self.assertRaises(ValueError):
             get_root_spec("baseline", True)
 
@@ -52,7 +60,7 @@ class TestSetupRoot(unittest.TestCase):
             self.assertIn('source "drivers/kernelsu/Kconfig"', (drivers / "Kconfig").read_text())
             self.assertIn("CONFIG_KSU=y", (arch_configs / "gki_defconfig").read_text())
 
-    def test_apply_flavor_quirks_resukisu_overrides_conflicts(self):
+    def test_apply_flavor_quirks_bakasu_overrides_conflicts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             arch_configs = base / "common" / "arch" / "arm64" / "configs"
@@ -63,12 +71,12 @@ class TestSetupRoot(unittest.TestCase):
                 "CONFIG_KSU_TOOLKIT_SUPPORT=n\n"
             )
 
-            dummy_src = base / "ReSukiSU" / "kernel"
+            dummy_src = base / "BakaSU" / "kernel"
             dummy_src.mkdir(parents=True)
             (dummy_src / "Kbuild").write_text("# dummy")
 
-            apply_flavor_quirks("resukisu", base, dummy_src)
-            apply_flavor_quirks("resukisu", base, dummy_src)
+            apply_flavor_quirks("bakasu", base, dummy_src)
+            apply_flavor_quirks("bakasu", base, dummy_src)
 
             content = defconfig.read_text()
             self.assertIn("CONFIG_KSU_MULTI_MANAGER_SUPPORT=n", content)
