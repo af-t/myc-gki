@@ -129,6 +129,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Show build configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "target=6.12.${{ matrix.sublevel }}-android16-${{ matrix.date }}"
+            echo "spl=${{ inputs.spl }}"
+            echo "build_method=${{ inputs.build_method }}"
+            echo "root_flavor=${{ inputs.root_flavor }}"
+            echo "with_susfs=${{ inputs.with_susfs }}"
+            echo "with_nomount=${{ inputs.with_nomount }}"
+            echo "with_bore=${{ inputs.with_bore }}"
+            echo "experimental_o3=${{ inputs.experimental_o3 }}"
+            echo "lto=${{ inputs.lto }}"
+            echo "allow_version_mismatch=${{ inputs.allow_version_mismatch }}"
+            echo "remove_protected_exports=${{ inputs.remove_protected_exports }}"
+            echo "use_source_cache=${{ inputs.use_source_cache }}"
+            echo "free_disk_space=${{ inputs.free_disk_space }}"
+            echo "brand_name=${{ inputs.brand_name }}"
+            echo "spoof_sublevel=${{ inputs.spoof_sublevel }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Free disk space
         if: inputs.free_disk_space
         uses: endersonmenezes/free-disk-space@v4
@@ -360,35 +382,8 @@ jobs:
           set -euo pipefail
           python3 scripts/apply_fragment.py --fragment configs/baseline.fragment --defconfig kernel/common/arch/arm64/configs/gki_defconfig
 
-      - name: Build kernel Image
-        shell: bash
-        working-directory: ${{ github.workspace }}/kernel
-        run: |
-          set -euo pipefail
-          # Kleaf-only: this manifest branch has no build/build.sh.
-          METHOD="${{ inputs.build_method }}"
-          if [ "$METHOD" != "auto" ] && [ "$METHOD" != "kleaf" ]; then
-            echo "::error::Unknown build_method: $METHOD (expected auto or kleaf)" >&2
-            exit 1
-          fi
-          echo "build_method=$METHOD (kleaf)"
-          sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
-          sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
-          if [ "${{ inputs.experimental_o3 }}" = "true" ]; then
-            python3 "$GITHUB_WORKSPACE/scripts/apply_kcflags.py" \
-              --build-file common/BUILD.bazel \
-              --flag=-O3
-          fi
-          LTO_ARGS=()
-          if [ "${{ inputs.lto }}" != "default" ]; then
-            LTO_ARGS+=("--lto=${{ inputs.lto }}")
-          fi
-          tools/bazel build --config=fast \
-            "${LTO_ARGS[@]}" \
-            --disk_cache=/home/runner/.cache/bazel \
-            //common:kernel_aarch64/Image
-
-      - name: Gather artifacts
+      - name: Write BuildInfo
+        if: always()
         shell: bash
         working-directory: ${{ github.workspace }}
         env:
@@ -407,19 +402,15 @@ jobs:
             fi
           done
           mkdir -p dist
-          if [ -f "kernel/bazel-bin/common/kernel_aarch64/Image" ]; then
-            cp kernel/bazel-bin/common/kernel_aarch64/Image dist/Image
-          elif [ -f "/home/runner/out/dist/Image" ]; then
-            cp /home/runner/out/dist/Image dist/Image
+          if [ -d kernel/common ]; then
+            SHA="$(git -C kernel/common rev-parse HEAD 2>/dev/null || echo unknown)"
+            DATE="$(git -C kernel/common log -1 --format=%cI 2>/dev/null || echo unknown)"
+            MSG="$(git -C kernel/common log -1 --format=%s 2>/dev/null || echo unknown)"
           else
-            echo "::error::Image not found; checked bazel-bin and out/dist"
-            exit 1
+            SHA="unknown"
+            DATE="unknown"
+            MSG="unknown"
           fi
-          cd kernel/common
-          SHA="$(git rev-parse HEAD)"
-          DATE="$(git log -1 --format=%cI)"
-          MSG="$(git log -1 --format=%s)"
-          cd "$GITHUB_WORKSPACE"
           TAG="$(jq -r '.common_tag' .github/config/android16-6.12.json)"
           REMOTE="$(jq -r '.common_remote' .github/config/android16-6.12.json)"
           FRAG_SHA="$(sha256sum configs/baseline.fragment | awk '{print $1}')"
@@ -471,6 +462,55 @@ jobs:
           notes=$NOTES
           EOF
           cat dist/BuildInfo.txt
+          {
+            echo '### Build info'
+            echo '```'
+            cat dist/BuildInfo.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build kernel Image
+        shell: bash
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -euo pipefail
+          # Kleaf-only: this manifest branch has no build/build.sh.
+          METHOD="${{ inputs.build_method }}"
+          if [ "$METHOD" != "auto" ] && [ "$METHOD" != "kleaf" ]; then
+            echo "::error::Unknown build_method: $METHOD (expected auto or kleaf)" >&2
+            exit 1
+          fi
+          echo "build_method=$METHOD (kleaf)"
+          sed -i 's/check_defconfig//' ./common/build.config.gki 2>/dev/null || true
+          sed -i '/name = "kernel_aarch64",/a\    check_defconfig = "disabled",' common/BUILD.bazel
+          if [ "${{ inputs.experimental_o3 }}" = "true" ]; then
+            python3 "$GITHUB_WORKSPACE/scripts/apply_kcflags.py" \
+              --build-file common/BUILD.bazel \
+              --flag=-O3
+          fi
+          LTO_ARGS=()
+          if [ "${{ inputs.lto }}" != "default" ]; then
+            LTO_ARGS+=("--lto=${{ inputs.lto }}")
+          fi
+          tools/bazel build --config=fast \
+            "${LTO_ARGS[@]}" \
+            --disk_cache=/home/runner/.cache/bazel \
+            //common:kernel_aarch64/Image
+
+      - name: Gather artifacts
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ -f "kernel/bazel-bin/common/kernel_aarch64/Image" ]; then
+            cp kernel/bazel-bin/common/kernel_aarch64/Image dist/Image
+          elif [ -f "/home/runner/out/dist/Image" ]; then
+            cp /home/runner/out/dist/Image dist/Image
+          else
+            echo "::error::Image not found; checked bazel-bin and out/dist"
+            exit 1
+          fi
 
       - name: Upload Image + BuildInfo
         uses: actions/upload-artifact@v4
