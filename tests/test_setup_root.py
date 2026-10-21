@@ -1,33 +1,45 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.setup_root import (
+    LATEST_RELEASE,
     apply_flavor_quirks,
     get_root_spec,
+    latest_release_tag,
+    resolve_commit,
     wire_kernelsu,
 )
 
 
 class TestSetupRoot(unittest.TestCase):
     def test_get_root_spec(self):
-        repo, branch, dir_name = get_root_spec("ksu", False)
+        repo, branch, dir_name, kind = get_root_spec("ksu", False)
         self.assertEqual(dir_name, "KernelSU")
         self.assertEqual(branch, "main")
+        self.assertEqual(kind, "branch")
 
-        repo, branch, dir_name = get_root_spec("ksunext", True)
+        repo, ref, dir_name, kind = get_root_spec("ksunext", False)
         self.assertEqual(dir_name, "KernelSU-Next")
-        self.assertEqual(branch, "dev-susfs")
+        self.assertEqual(kind, LATEST_RELEASE)
+        self.assertIn("KernelSU-Next/KernelSU-Next", repo)
 
-        repo, branch, dir_name = get_root_spec("sukisu-ultra", True)
+        repo, ref, dir_name, kind = get_root_spec("ksunext", True)
+        self.assertEqual(dir_name, "KernelSU-Next")
+        self.assertEqual(ref, "dev-susfs")
+        self.assertEqual(kind, "branch")
+        self.assertIn("pershoot/KernelSU-Next", repo)
+
+        repo, branch, dir_name, kind = get_root_spec("sukisu-ultra", True)
         self.assertEqual(branch, "builtin")
 
-        repo, branch, dir_name = get_root_spec("bakasu", False)
+        repo, branch, dir_name, kind = get_root_spec("bakasu", False)
         self.assertEqual(dir_name, "BakaSU")
         self.assertEqual(branch, "main")
         self.assertIn("Baka-SU/BakaSU", repo)
 
-        repo, branch, dir_name = get_root_spec("resukisu", False)
+        repo, branch, dir_name, kind = get_root_spec("resukisu", False)
         self.assertEqual(dir_name, "BakaSU")
 
         with self.assertRaises(ValueError):
@@ -35,6 +47,33 @@ class TestSetupRoot(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             get_root_spec("invalid", False)
+
+    def test_latest_release_tag_picks_highest_semver(self):
+        stdout = (
+            "aaa\trefs/tags/v1.0.9\n"
+            "bbb\trefs/tags/v3.4.2\n"
+            "ccc\trefs/tags/v3.4.10\n"
+            "ddd\trefs/tags/v3.0.1-legacy\n"
+        )
+        with mock.patch("scripts.setup_root.subprocess.run", return_value=mock.Mock(stdout=stdout)):
+            self.assertEqual(latest_release_tag("repo"), "v3.4.10")
+
+    def test_resolve_commit_prefers_peeled_tag(self):
+        stdout = (
+            "tagobj\trefs/tags/v3.4.2\n"
+            "commit1\trefs/tags/v3.4.2^{}\n"
+        )
+        with mock.patch("scripts.setup_root.subprocess.run", return_value=mock.Mock(stdout=stdout)):
+            commit, ref = resolve_commit("repo", "v3.4.2", "tag")
+            self.assertEqual(commit, "commit1")
+            self.assertEqual(ref, "v3.4.2")
+
+    def test_resolve_commit_branch(self):
+        stdout = "abc123\trefs/heads/main\n"
+        with mock.patch("scripts.setup_root.subprocess.run", return_value=mock.Mock(stdout=stdout)):
+            commit, ref = resolve_commit("repo", "main", "branch")
+            self.assertEqual(commit, "abc123")
+            self.assertEqual(ref, "main")
 
     def test_wire_kernelsu(self):
         with tempfile.TemporaryDirectory() as tmpdir:

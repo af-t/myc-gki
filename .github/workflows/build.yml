@@ -460,6 +460,7 @@ jobs:
           build_method=${{ inputs.build_method }}
           remove_protected_exports=${{ inputs.remove_protected_exports }}
           root_flavor=${{ inputs.root_flavor }}
+          root_ref=${ROOT_REF:-}
           with_susfs=${{ inputs.with_susfs }}
           with_nomount=${{ inputs.with_nomount }}
           with_bore=${{ inputs.with_bore }}
