@@ -1,6 +1,6 @@
 diff --git a/fs/fmrd.c b/fs/fmrd.c
 new file mode 100644
-index 000000000..04a2efce7
+index 000000000..9558c727b
 --- /dev/null
 +++ b/fs/fmrd.c
 @@ -0,0 +1,362 @@
@@ -20,7 +20,7 @@ index 000000000..04a2efce7
 +#include <linux/fmrd.h>
 +
 +#define SANITIZED_PATH_MAX 256
-+#define RAW_PATH_SCAN_MAX 4096
++#define RAW_PATH_SCAN_MAX 256
 +#define MAX_PATH_COMPONENTS 128
 +
 +unsigned long fmrd_data_adb_ino;
@@ -184,7 +184,7 @@ index 000000000..04a2efce7
 +	bool saw_root_data_adb = false;
 +	int n;
 +
-+	if (!name || IS_ERR(name) || !name->name || name->name[0] != '/')
++if (!name || IS_ERR(name) || !name->name || name->name[0] != '/')
 +		return FMRD_NOT_BLOCKED;
 +	if (!path_has_non_ascii_or_control(name->name) &&
 +	    !str_contains_adb(name->name))
@@ -250,7 +250,7 @@ index 000000000..04a2efce7
 +
 +enum fmrd_blocked_type fmrd_fuse_zwc_check(const struct filename *name)
 +{
-+	if (!name || IS_ERR(name) || !name->name || !name->name[0])
++	if (!name || IS_ERR(name) || !name->name || !strchr(name->name, '/'))
 +		return FMRD_NOT_BLOCKED;
 +	if (!path_has_non_ascii_or_control(name->name))
 +		return FMRD_NOT_BLOCKED;
@@ -367,7 +367,7 @@ index 000000000..04a2efce7
 +
 +MODULE_LICENSE("GPL");
 diff --git a/fs/namei.c b/fs/namei.c
-index ce03b3d91..d578f6bbc 100644
+index ce03b3d91..2ff6feacd 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -40,6 +40,7 @@
@@ -442,12 +442,16 @@ index ce03b3d91..d578f6bbc 100644
  	struct dentry *old;
  	struct inode *dir = base->d_inode;
  
-@@ -2605,6 +2647,13 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
+@@ -2605,6 +2647,17 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
  	struct nameidata nd;
  	if (IS_ERR(name))
  		return PTR_ERR(name);
 +#ifdef CONFIG_FMRD
 +	if (from_kuid(&init_user_ns, current_uid()) >= FMRD_UNTRUSTED_UID_MIN) {
++		if (unlikely(name->name[0] == '/' &&
++			     ((name->name[1] == 'A' && name->name[2] == 'A') ||
++			      (strnlen(name->name + 1, 65) >= 64 && !strchr(name->name + 1, '/')))))
++			return -ENOENT;
 +		if (fmrd_adb_path_blocked_type(name) != FMRD_NOT_BLOCKED ||
 +		    fmrd_fuse_zwc_check(name) != FMRD_NOT_BLOCKED)
 +			return -ENOENT;
@@ -456,7 +460,7 @@ index ce03b3d91..d578f6bbc 100644
  	set_nameidata(&nd, dfd, name, root);
  	retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);
  	if (unlikely(retval == -ECHILD))
-@@ -3956,6 +4005,20 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
+@@ -3956,6 +4007,20 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
  	int flags = op->lookup_flags;
  	struct file *filp;
  
@@ -477,7 +481,7 @@ index ce03b3d91..d578f6bbc 100644
  	set_nameidata(&nd, dfd, pathname, NULL);
  	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
  	if (unlikely(filp == ERR_PTR(-ECHILD)))
-@@ -4004,6 +4067,17 @@ static struct dentry *filename_create(int dfd, struct filename *name,
+@@ -4004,6 +4069,17 @@ static struct dentry *filename_create(int dfd, struct filename *name,
  	int err2;
  	int error;
  
