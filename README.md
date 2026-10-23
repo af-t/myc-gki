@@ -12,10 +12,14 @@ This project integrates, adapts, and ports patches and techniques from the follo
   Burst-oriented interactive CPU scheduler algorithmic extension adapted for KMI preservation.
 - **NoMount** - [maxsteeel (@maxsteeel)](https://github.com/maxsteeel/nomount)
   In-kernel VFS path redirection framework.
+- **FMRD (Fix My Root Detection)** - [af-t](https://github.com/af-t/fmrd)
+  Kernel-level VFS and syscall anti-detection patch closing `/data/adb` probes, devpts root PTY ownership leaks, task visibility checks, and FUSE zero-width character lookups.
 - **SUSFS (KernelSU root hiding)** - [simonpunk (@simonpunk)](https://gitlab.com/simonpunk/susfs4ksu)
   Kernel-level isolation and root evasion patches.
 - **KernelSU** - [tiann (@tiann)](https://github.com/tiann/KernelSU)
   Kernel-based root solution for Android GKI devices.
+- **KowSU** - [KOWX712 (@KOWX712)](https://github.com/KOWX712/KernelSU)
+  KernelSU fork based on backslashxx, focused on Material theming; no SUSFS integration.
 - **KernelSU-Next** - [rifsxd (@rifsxd)](https://github.com/rifsxd/KernelSU-Next)
   Active KernelSU continuation with extended patch support.
 - **SukiSU-Ultra** - [The-SukiSU-Ultra-Project](https://github.com/The-SukiSU-Ultra-Project/SukiSU-Ultra)

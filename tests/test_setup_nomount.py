@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ class TestSetupNomount(unittest.TestCase):
             self.assertLess(kconfig.index('source "fs/nomount/Kconfig"'), kconfig.index("endmenu"))
             defconfig = (kernel_dir / "common" / "arch" / "arm64" / "configs" / "gki_defconfig").read_text()
             self.assertIn("CONFIG_NOMOUNT=y", defconfig)
+            self.assertIn("CONFIG_KEYS=y", defconfig)
             self.assertNotIn("CONFIG_NOMOUNT=n", defconfig)
 
     def test_wire_nomount_is_idempotent(self):
@@ -84,6 +86,57 @@ class TestSetupNomount(unittest.TestCase):
 
             self.assertEqual(sha, expected)
             self.assertTrue((kernel_dir / "common" / "fs" / "nomount").is_symlink())
+
+    def test_setup_nomount_cloned_no_checkout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            kernel_dir, _ = self._make_tree(base)
+            repo_dir = kernel_dir / "NoMount"
+            subprocess.run(["git", "init", "-q", str(repo_dir)], check=True)
+            subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(repo_dir), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo_dir), "commit", "-qm", "init"], check=True)
+            expected = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            # Simulate --no-checkout by removing working directory files while keeping .git
+            for item in repo_dir.iterdir():
+                if item.name != ".git":
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+
+            sha = setup_nomount(kernel_dir)
+            self.assertEqual(sha, expected)
+            self.assertTrue((repo_dir / "kernel" / "src" / "Kconfig").is_file())
+            self.assertTrue((kernel_dir / "common" / "fs" / "nomount").is_symlink())
+
+    def test_wire_nomount_flat_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            kernel_dir = base / "kernel"
+            fs_dir = kernel_dir / "fs"
+            fs_dir.mkdir(parents=True)
+            (fs_dir / "Makefile").write_text("obj-y += existing/\n")
+            (fs_dir / "Kconfig").write_text('menu "File systems"\nendmenu\n')
+            defconfig = kernel_dir / "arch" / "arm64" / "configs" / "gki_defconfig"
+            defconfig.parent.mkdir(parents=True)
+            defconfig.write_text("CONFIG_NOMOUNT=n\n")
+            source_dir = kernel_dir / "NoMount" / "kernel" / "src"
+            source_dir.mkdir(parents=True)
+            (source_dir / "Kconfig").write_text('config NOMOUNT\n\ttristate "NoMount"\n')
+
+            wire_nomount(kernel_dir, source_dir)
+
+            self.assertTrue((fs_dir / "nomount").is_symlink())
+            self.assertIn("CONFIG_NOMOUNT=y", defconfig.read_text())
+            self.assertIn("CONFIG_KEYS=y", defconfig.read_text())
 
 
 if __name__ == "__main__":

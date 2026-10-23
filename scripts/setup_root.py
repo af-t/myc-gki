@@ -58,6 +58,10 @@ def get_root_spec(root_flavor: str, with_susfs: bool) -> tuple[str, str, str, st
 
     if root_flavor == "ksu":
         return "https://github.com/tiann/KernelSU.git", "main", "KernelSU", "branch"
+    if root_flavor == "kowsu":
+        if with_susfs:
+            raise ValueError("kowsu has no SUSFS integration; use ksu, ksunext, sukisu-ultra, or bakasu")
+        return "https://github.com/KOWX712/KernelSU.git", "master", "KernelSU", "branch"
     if root_flavor == "ksunext":
         if with_susfs:
             return "https://github.com/pershoot/KernelSU-Next.git", "dev-susfs", "KernelSU-Next", "branch"
@@ -171,7 +175,7 @@ def setup_root(
     if not root_dir.exists():
         subprocess.run(["git", "clone", "--no-checkout", repo, str(root_dir)], check=True)
     subprocess.run(["git", "-C", str(root_dir), "fetch", "--depth=1", "origin", commit], check=True)
-    subprocess.run(["git", "-C", str(root_dir), "checkout", "--detach", commit], check=True)
+    subprocess.run(["git", "-C", str(root_dir), "checkout", "-f", "--detach", commit], check=True)
 
     source_dir = root_dir / "kernel"
     if not (source_dir / "Kconfig").is_file() or not (source_dir / "Makefile").is_file():
@@ -193,7 +197,7 @@ def setup_root(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Integrate root implementation (KernelSU variants).")
     parser.add_argument("--kernel-dir", type=Path, default=Path("kernel"), help="Path to kernel root (default: kernel)")
-    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (baseline, ksu, ksunext, sukisu-ultra, bakasu)")
+    parser.add_argument("--flavor", type=str, default="baseline", help="Root flavor (baseline, ksu, kowsu, ksunext, sukisu-ultra, bakasu)")
     parser.add_argument("--with-susfs", action="store_true", help="Enable SUSFS compatibility")
     parser.add_argument("--commit", type=str, default=None, help="Explicit commit SHA")
     args = parser.parse_args()

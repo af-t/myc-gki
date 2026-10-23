@@ -58,8 +58,11 @@ def wire_nomount(kernel_dir: Path, source_dir: Path) -> None:
 
     defconfig = kernel_dir / "common" / "arch" / "arm64" / "configs" / "gki_defconfig"
     if not defconfig.is_file():
+        defconfig = kernel_dir / "arch" / "arm64" / "configs" / "gki_defconfig"
+    if not defconfig.is_file():
         raise FileNotFoundError(f"defconfig not found: {defconfig}")
     set_config(defconfig, "CONFIG_NOMOUNT", "y")
+    set_config(defconfig, "CONFIG_KEYS", "y")
 
 
 def _resolve_commit(repo_dir: Path) -> str | None:
@@ -73,11 +76,13 @@ def _resolve_commit(repo_dir: Path) -> str | None:
 
 
 def _checkout_commit(repo_dir: Path, commit: str) -> None:
+    source_dir = repo_dir / "kernel" / "src"
     current = _git(repo_dir, "rev-parse", "HEAD")
-    if current.returncode == 0 and current.stdout.strip() == commit:
+    if current.returncode == 0 and current.stdout.strip() == commit and (source_dir / "Kconfig").is_file():
         return
-    subprocess.run(["git", "-C", str(repo_dir), "fetch", "--depth=1", "origin", commit], check=True)
-    subprocess.run(["git", "-C", str(repo_dir), "checkout", "--detach", commit], check=True)
+    if _git(repo_dir, "cat-file", "-e", commit).returncode != 0:
+        subprocess.run(["git", "-C", str(repo_dir), "fetch", "--depth=1", "origin", commit], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "checkout", "-f", "--detach", commit], check=True)
 
 
 def setup_nomount(kernel_dir: Path, commit: str | None = None) -> str:

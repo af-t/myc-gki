@@ -20,6 +20,15 @@ class TestSetupRoot(unittest.TestCase):
         self.assertEqual(branch, "main")
         self.assertEqual(kind, "branch")
 
+        repo, branch, dir_name, kind = get_root_spec("kowsu", False)
+        self.assertEqual(dir_name, "KernelSU")
+        self.assertEqual(branch, "master")
+        self.assertEqual(kind, "branch")
+        self.assertIn("KOWX712/KernelSU", repo)
+
+        with self.assertRaises(ValueError):
+            get_root_spec("kowsu", True)
+
         repo, ref, dir_name, kind = get_root_spec("ksunext", False)
         self.assertEqual(dir_name, "KernelSU-Next")
         self.assertEqual(kind, LATEST_RELEASE)
