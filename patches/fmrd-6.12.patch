@@ -1,9 +1,45 @@
+diff --git a/block/ioprio.c b/block/ioprio.c
+index 73301a261..c88200526 100644
+--- a/block/ioprio.c
++++ b/block/ioprio.c
+@@ -28,6 +28,7 @@
+ #include <linux/capability.h>
+ #include <linux/syscalls.h>
+ #include <linux/security.h>
++#include <linux/fmrd.h>
+ #include <linux/pid_namespace.h>
+ 
+ int ioprio_check_cap(int ioprio)
+@@ -74,6 +75,11 @@ SYSCALL_DEFINE3(ioprio_set, int, which, int, who, int, ioprio)
+ 	kuid_t uid;
+ 	int ret;
+ 
++#ifdef CONFIG_FMRD
++	if (which == IOPRIO_WHO_USER && fmrd_should_hide_prio(PRIO_USER, who))
++		return -ESRCH;
++#endif
++
+ 	ret = ioprio_check_cap(ioprio);
+ 	if (ret)
+ 		return ret;
+@@ -190,6 +196,11 @@ SYSCALL_DEFINE2(ioprio_get, int, which, int, who)
+ 	int ret = -ESRCH;
+ 	int tmpio;
+ 
++#ifdef CONFIG_FMRD
++	if (which == IOPRIO_WHO_USER && fmrd_should_hide_prio(PRIO_USER, who))
++		return -ESRCH;
++#endif
++
+ 	rcu_read_lock();
+ 	switch (which) {
+ 		case IOPRIO_WHO_PROCESS:
 diff --git a/fs/fmrd.c b/fs/fmrd.c
 new file mode 100644
-index 000000000..9558c727b
+index 000000000..1d4394f8b
 --- /dev/null
 +++ b/fs/fmrd.c
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,369 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#define pr_fmt(fmt) "fmrd: " fmt
 +
@@ -21,9 +57,11 @@ index 000000000..9558c727b
 +
 +#define SANITIZED_PATH_MAX 256
 +#define RAW_PATH_SCAN_MAX 256
-+#define MAX_PATH_COMPONENTS 128
++#define MAX_PATH_COMPONENTS 32
++#define MAX_COMP_LEN_CHECK 64
 +
 +unsigned long fmrd_data_adb_ino;
++dev_t fmrd_data_adb_dev;
 +
 +struct path_component {
 +	unsigned short offset;
@@ -129,6 +167,9 @@ index 000000000..9558c727b
 +			p++;
 +		raw_len = (size_t)(p - raw_start);
 +
++		if (raw_len >= MAX_COMP_LEN_CHECK)
++			return 0;
++
 +		if (raw_len == 1 && raw_start[0] == '.')
 +			continue;
 +		if (raw_len == 2 && raw_start[0] == '.' &&
@@ -184,7 +225,7 @@ index 000000000..9558c727b
 +	bool saw_root_data_adb = false;
 +	int n;
 +
-+if (!name || IS_ERR(name) || !name->name || name->name[0] != '/')
++	if (!name || IS_ERR(name) || !name->name || name->name[0] != '/')
 +		return FMRD_NOT_BLOCKED;
 +	if (!path_has_non_ascii_or_control(name->name) &&
 +	    !str_contains_adb(name->name))
@@ -304,8 +345,10 @@ index 000000000..9558c727b
 +		return false;
 +
 +	if (fmrd_is_data_root_dentry(dentry->d_parent)) {
-+		if (dentry->d_inode && !fmrd_data_adb_ino)
-+			fmrd_data_adb_ino = dentry->d_inode->i_ino;
++		if (dentry->d_inode && !READ_ONCE(fmrd_data_adb_ino)) {
++			WRITE_ONCE(fmrd_data_adb_dev, dentry->d_inode->i_sb->s_dev);
++			WRITE_ONCE(fmrd_data_adb_ino, dentry->d_inode->i_ino);
++		}
 +		return true;
 +	}
 +
@@ -367,7 +410,7 @@ index 000000000..9558c727b
 +
 +MODULE_LICENSE("GPL");
 diff --git a/fs/namei.c b/fs/namei.c
-index ce03b3d91..2ff6feacd 100644
+index ce03b3d91..151d1eb2b 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
 @@ -40,6 +40,7 @@
@@ -378,14 +421,16 @@ index ce03b3d91..2ff6feacd 100644
  
  #include "internal.h"
  #include "mount.h"
-@@ -512,6 +513,17 @@ int inode_permission(struct mnt_idmap *idmap,
+@@ -512,6 +513,19 @@ int inode_permission(struct mnt_idmap *idmap,
  {
  	int retval;
  
 +#ifdef CONFIG_FMRD
-+	if (fmrd_data_adb_ino && inode && inode->i_ino == fmrd_data_adb_ino &&
-+	    inode->i_sb && (inode->i_sb->s_magic == F2FS_SUPER_MAGIC ||
-+			    inode->i_sb->s_magic == EXT4_SUPER_MAGIC) &&
++	if (READ_ONCE(fmrd_data_adb_ino) && inode &&
++	    inode->i_ino == READ_ONCE(fmrd_data_adb_ino) && inode->i_sb &&
++	    inode->i_sb->s_dev == READ_ONCE(fmrd_data_adb_dev) &&
++	    (inode->i_sb->s_magic == F2FS_SUPER_MAGIC ||
++	     inode->i_sb->s_magic == EXT4_SUPER_MAGIC) &&
 +	    from_kuid(&init_user_ns, current_uid()) >= FMRD_UNTRUSTED_UID_MIN) {
 +		if (mask & MAY_WRITE)
 +			return -EACCES;
@@ -396,7 +441,7 @@ index ce03b3d91..2ff6feacd 100644
  	retval = sb_permission(inode->i_sb, inode, mask);
  	if (retval)
  		return retval;
-@@ -885,6 +897,21 @@ static int complete_walk(struct nameidata *nd)
+@@ -885,6 +899,23 @@ static int complete_walk(struct nameidata *nd)
  	struct dentry *dentry = nd->path.dentry;
  	int status;
  
@@ -407,8 +452,10 @@ index ce03b3d91..2ff6feacd 100644
 +	    ((dentry->d_name.name[2] | 0x20) == 'b') &&
 +	    fmrd_is_data_root_dentry(dentry->d_parent) &&
 +	    from_kuid(&init_user_ns, current_uid()) >= FMRD_UNTRUSTED_UID_MIN) {
-+		if (dentry->d_inode && !fmrd_data_adb_ino)
-+			fmrd_data_adb_ino = dentry->d_inode->i_ino;
++		if (dentry->d_inode && !READ_ONCE(fmrd_data_adb_ino)) {
++			WRITE_ONCE(fmrd_data_adb_dev, dentry->d_inode->i_sb->s_dev);
++			WRITE_ONCE(fmrd_data_adb_ino, dentry->d_inode->i_ino);
++		}
 +		if (nd->flags & LOOKUP_CREATE)
 +			return -EACCES;
 +		return -ENOENT;
@@ -418,13 +465,15 @@ index ce03b3d91..2ff6feacd 100644
  	if (nd->flags & LOOKUP_RCU) {
  		/*
  		 * We don't want to zero nd->root for scoped-lookups or
-@@ -1615,7 +1642,22 @@ struct dentry *lookup_one_qstr_excl(const struct qstr *name,
+@@ -1615,10 +1646,25 @@ struct dentry *lookup_one_qstr_excl(const struct qstr *name,
  				    struct dentry *base,
  				    unsigned int flags)
  {
 -	struct dentry *dentry = lookup_dcache(name, base, flags);
 +	struct dentry *dentry;
-+
+ 	struct dentry *old;
+ 	struct inode *dir = base->d_inode;
+ 
 +#ifdef CONFIG_FMRD
 +	if (name && base && name->len == 3 &&
 +	    ((name->name[0] | 0x20) == 'a') &&
@@ -439,10 +488,11 @@ index ce03b3d91..2ff6feacd 100644
 +#endif
 +
 +	dentry = lookup_dcache(name, base, flags);
- 	struct dentry *old;
- 	struct inode *dir = base->d_inode;
++
+ 	if (dentry)
+ 		return dentry;
  
-@@ -2605,6 +2647,17 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
+@@ -2605,6 +2651,17 @@ int filename_lookup(int dfd, struct filename *name, unsigned flags,
  	struct nameidata nd;
  	if (IS_ERR(name))
  		return PTR_ERR(name);
@@ -460,7 +510,7 @@ index ce03b3d91..2ff6feacd 100644
  	set_nameidata(&nd, dfd, name, root);
  	retval = path_lookupat(&nd, flags | LOOKUP_RCU, path);
  	if (unlikely(retval == -ECHILD))
-@@ -3956,6 +4007,20 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
+@@ -3956,6 +4013,20 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
  	int flags = op->lookup_flags;
  	struct file *filp;
  
@@ -481,7 +531,7 @@ index ce03b3d91..2ff6feacd 100644
  	set_nameidata(&nd, dfd, pathname, NULL);
  	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
  	if (unlikely(filp == ERR_PTR(-ECHILD)))
-@@ -4004,6 +4069,17 @@ static struct dentry *filename_create(int dfd, struct filename *name,
+@@ -4004,6 +4075,17 @@ static struct dentry *filename_create(int dfd, struct filename *name,
  	int err2;
  	int error;
  
@@ -530,10 +580,10 @@ index adb071bc9..b13a9868e 100644
  		return retval;
 diff --git a/include/linux/fmrd.h b/include/linux/fmrd.h
 new file mode 100644
-index 000000000..46ef7b0fa
+index 000000000..c51f8cd80
 --- /dev/null
 +++ b/include/linux/fmrd.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,68 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _LINUX_FMRD_H
 +#define _LINUX_FMRD_H
@@ -558,6 +608,7 @@ index 000000000..46ef7b0fa
 +#ifdef CONFIG_FMRD
 +
 +extern unsigned long fmrd_data_adb_ino;
++extern dev_t fmrd_data_adb_dev;
 +
 +bool fmrd_is_data_root_dentry(struct dentry *base);
 +bool fmrd_is_data_adb_path(const struct path *path);
@@ -601,8 +652,32 @@ index 000000000..46ef7b0fa
 +#endif /* CONFIG_FMRD */
 +
 +#endif /* _LINUX_FMRD_H */
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 61a03a61e..15298559a 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -62,6 +62,7 @@
+ 
+ #undef CREATE_TRACE_POINTS
+ #include <trace/hooks/signal.h>
++#include <linux/fmrd.h>
+ /*
+  * SLAB caches for signal bits.
+  */
+@@ -861,6 +862,11 @@ static int check_kill_permission(int sig, struct kernel_siginfo *info,
+ 				break;
+ 			fallthrough;
+ 		default:
++#ifdef CONFIG_FMRD
++			if (sig == 0 && !is_global_init(t) &&
++			    from_kuid(&init_user_ns, current_uid()) >= FMRD_UNTRUSTED_UID_MIN)
++				return -ESRCH;
++#endif
+ 			return -EPERM;
+ 		}
+ 	}
 diff --git a/kernel/sys.c b/kernel/sys.c
-index 4a87dc5fa..d59a1b713 100644
+index 4a87dc5fa..deb3a0388 100644
 --- a/kernel/sys.c
 +++ b/kernel/sys.c
 @@ -74,6 +74,7 @@
@@ -613,7 +688,19 @@ index 4a87dc5fa..d59a1b713 100644
  
  #include "uid16.h"
  
-@@ -308,6 +309,11 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
+@@ -238,6 +239,11 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
+ 	if (which > PRIO_USER || which < PRIO_PROCESS)
+ 		goto out;
+ 
++#ifdef CONFIG_FMRD
++	if (fmrd_should_hide_prio(which, who))
++		return -ESRCH;
++#endif
++
+ 	/* normalize: avoid signed division (rounding problems) */
+ 	error = -ESRCH;
+ 	if (niceval < MIN_NICE)
+@@ -308,6 +314,11 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
  	if (which > PRIO_USER || which < PRIO_PROCESS)
  		return -EINVAL;
  
